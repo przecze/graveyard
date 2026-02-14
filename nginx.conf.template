@@ -34,6 +34,12 @@ http {
     "1"     " 'unsafe-inline' 'unsafe-eval'";
   }
 
+  map "${DEV_MODE}" $dev_connect_policy {
+    default "";
+    "true"  " ws: wss:";
+    "1"     " ws: wss:";
+  }
+
   server {
     listen 80;
     server_tokens off;
@@ -48,7 +54,7 @@ http {
     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     add_header Cross-Origin-Resource-Policy "same-site" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'${dev_script_policy}; style-src 'self'${dev_style_inline}; font-src 'self' data:; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'${dev_script_policy}; style-src 'self'${dev_style_inline}; font-src 'self' data:; img-src 'self' data: https:; connect-src 'self'${dev_connect_policy}; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" always;
 
     # --- Block common scanner paths ---
     location ~* \.(php|asp|aspx|jsp|cgi|pl|sh|py|rb)$ { return 404; }
@@ -70,6 +76,33 @@ http {
       proxy_set_header X-Forwarded-Proto $scheme;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection $connection_upgrade;
+    }
+
+    # --- Vite dev server paths (proxied directly, no try_files) ---
+
+    # HMR WebSocket — dedicated path, long-lived connection
+    location = /__vite_hmr {
+      proxy_pass http://$vite_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $http_host;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_read_timeout 86400s;
+      proxy_send_timeout 86400s;
+    }
+
+    # Vite internal paths (/@vite/, /@react-refresh, /@fs/, etc.)
+    location ~ ^/@ {
+      proxy_pass http://$vite_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $http_host;
+    }
+
+    # Vite source files (HMR needs to fetch updated modules)
+    location ^~ /src/ {
+      proxy_pass http://$vite_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $http_host;
     }
 
     # Allow Vite dev dependencies before catch-all
