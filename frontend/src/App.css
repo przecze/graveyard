@@ -1,116 +1,183 @@
 /* ---- layout ---- */
 .app {
-  padding: 24px 28px;
-  max-width: 940px;
+  padding: 32px 36px;
+  max-width: 1100px;
   margin: 0 auto;
 }
 
 .title {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 700;
   color: #ccc;
-  margin: 0 0 2px;
+  margin-bottom: 4px;
 }
+
 .subtitle {
-  font-size: 13px;
+  font-size: 12px;
   color: #666;
-  margin: 0 0 18px;
+  margin-bottom: 20px;
 }
 
 /* ---- controls ---- */
 .controls {
   display: flex;
-  align-items: flex-end;
-  gap: 20px;
+  gap: 36px;
   flex-wrap: wrap;
-  padding: 14px 18px;
+  padding: 16px 20px;
   background: #1a1a1a;
   border: 1px solid #252525;
   border-radius: 6px;
-  margin-bottom: 18px;
+  margin-bottom: 20px;
 }
+
 .ctrl {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  font-size: 12px;
+  gap: 6px;
+  font-size: 13px;
   color: #888;
   cursor: pointer;
 }
+
 .ctrl b {
-  color: #bbb;
+  color: #ccc;
   font-variant-numeric: tabular-nums;
 }
+
 .ctrl input[type="range"] {
-  width: 130px;
+  width: 240px;
   accent-color: #4ecdc4;
 }
-.btn {
-  margin-left: auto;
-  padding: 7px 16px;
-  background: #252525;
+
+/* ---- chart ---- */
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
   color: #999;
-  border: 1px solid #3a3a3a;
-  border-radius: 4px;
-  font: 12px monospace;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn:hover {
-  background: #333;
-  color: #ccc;
+  margin-bottom: 8px;
 }
 
-/* ---- main area ---- */
-.main {
+.chart-note {
+  font-weight: 400;
+  font-size: 12px;
+  color: #555;
+}
+
+.chart-wrap {
+  background: #0e0e0e;
+  border: 1px solid #1e1e1e;
+  border-radius: 6px;
+  padding: 12px 8px 8px;
+  margin-bottom: 24px;
+}
+
+/* ---- tessellation ---- */
+.tess-section {
   display: flex;
-  gap: 18px;
+  gap: 24px;
   align-items: flex-start;
+  background: #0e0e0e;
+  border: 1px solid #1e1e1e;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 24px;
 }
 
-.left-col {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.tess-svg-wrap {
   flex-shrink: 0;
 }
 
-.cloud {
-  border: 1px solid #1e1e1e;
-  border-radius: 4px;
-  cursor: crosshair;
+.tess-svg {
+  width: 340px;
+  height: 340px;
 }
 
-.viewport {
-  border: 1px solid #1e1e1e;
-  border-radius: 4px;
-}
-
-.charts {
+.tess-panel {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-}
-.charts canvas {
-  border: 1px solid #1e1e1e;
-  border-radius: 4px;
+  gap: 16px;
 }
 
-.ring-inspect {
-  padding: 6px 0;
-}
-.ring-inspect .ctrl input[type="range"] {
+.tess-panel .ctrl input[type="range"] {
   width: 100%;
 }
 
-.cell-info {
-  padding: 8px 12px;
-  background: #1a1a1a;
-  border: 1px solid #252525;
-  border-radius: 4px;
-  font: 12px monospace;
-  color: #aaa;
+/* info grid */
+.tess-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 20px;
 }
-.cell-info b {
-  color: #4ecdc4;
+
+.tess-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tess-label {
+  font: 11px monospace;
+  color: #555;
+}
+
+.tess-value {
+  font: 13px monospace;
+  color: #ccc;
+}
+
+/* neighbors */
+.tess-neighbors {
+  background: #141414;
+  border: 1px solid #1e1e1e;
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.tess-neighbors h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: #999;
+  margin-bottom: 10px;
+}
+
+.tess-neighbor-row {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  font: 12px monospace;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.tess-neighbor-row:last-child {
+  border-bottom: none;
+}
+
+.tess-neighbor-total {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #252525;
+}
+
+.tess-n-label {
+  color: #666;
+  white-space: nowrap;
+  min-width: 140px;
+}
+
+.tess-n-value {
+  color: #aaa;
+  word-break: break-all;
+}
+
+.tess-neighbor-detail {
+  font: 11px monospace;
+  color: #777;
+  padding: 2px 0 2px 20px;
+}
+
+/* recharts legend text */
+.recharts-legend-item-text {
+  color: #888 !important;
 }

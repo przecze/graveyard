@@ -1,978 +1,493 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useMemo } from 'react';
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis,
+  CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
+import { Graveyard, type ChunkInfo, type ChunkAddr, type BoundaryNeighbor } from './graveyard';
 import './App.css';
 
 // ----------------------------------------------------------------
-// Types
+// Formatting helpers
 // ----------------------------------------------------------------
-interface Point { x: number; y: number; r: number }
-interface BinData { counts: number[]; areas: number[]; densities: number[]; dr: number }
-interface TessRing {
-  rInner: number;
-  rOuter: number;
-  numSlices: number;
-  sliceCounts: number[];
-}
-
-// ----------------------------------------------------------------
-// Constants
-// ----------------------------------------------------------------
-const S = 480;
-const HALF = S / 2;
-const MARGIN = 12;
-const SCALE = HALF - MARGIN;
-const VP_W = 480;
-const VP_H = 360;
-const END_YEAR = 2026;
-
-// ----------------------------------------------------------------
-// Seeded PRNG (mulberry32)
-// ----------------------------------------------------------------
-function makePRNG(seed: number) {
-  let s = seed | 0;
-  return () => {
-    s = s + 0x6D2B79F5 | 0;
-    let t = Math.imul(s ^ s >>> 15, 1 | s);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
-
-// ----------------------------------------------------------------
-// Model:  f(t) = A · (e^(αt) − 1),   t ∈ [0, T]
-//
-//   Constraints (3 equations, 2 unknowns → unique):
-//     f(0) = 0                        (by construction)
-//     ∫₀ᵀ f(t) dt  = N_tot           (total graves)
-//     f(T) · δ      = N_curr          (deaths in last δ years)
-//
-//   Eliminating A:
-//     N_curr · [1/α − T/(e^(αT)−1)] = N_tot · δ
-//   → bisect for α, then A = N_curr / (δ·(e^(αT)−1))
-// ----------------------------------------------------------------
-function solveModel(
-  nTot: number, nCurr: number, T: number, delta: number,
-): { alpha: number; A: number; beta: number } {
-  const target = nTot * delta;
-
-  const h = (a: number): number => {
-    if (a < 1e-12) return nCurr * T / 2 - target;
-    const aT = a * T;
-    if (aT > 600) return nCurr / a - target;
-    const eaT = Math.exp(aT);
-    return nCurr * (1 / a - T / (eaT - 1)) - target;
-  };
-
-  const h0 = h(0);
-  if (h0 <= 1e-6) {
-    const alpha = 1e-10;
-    return { alpha, A: nCurr / (delta * alpha * T), beta: alpha * T };
-  }
-
-  let lo = 1e-12, hi = 0.01;
-  while (h(hi) > 0 && hi < 10) hi *= 2;
-
-  for (let i = 0; i < 100; i++) {
-    const mid = (lo + hi) / 2;
-    if (h(mid) > 0) lo = mid; else hi = mid;
-  }
-
-  const alpha = (lo + hi) / 2;
-  const beta = alpha * T;
-  const eaT = Math.exp(Math.min(beta, 600));
-  const A = nCurr / (delta * Math.max(eaT - 1, 1e-20));
-
-  return { alpha, A, beta };
-}
-
-// ----------------------------------------------------------------
-// Expected counts per bin from the model
-// ----------------------------------------------------------------
-function modelExpectedCounts(
-  A: number, alpha: number, T: number, numBins: number,
-): number[] {
-  const dt = T / numBins;
-  if (alpha < 1e-12 || A < 1e-20) return new Array(numBins).fill(0);
-  return Array.from({ length: numBins }, (_, i) => {
-    const t1 = i * dt;
-    const t2 = (i + 1) * dt;
-    return Math.max(0,
-      A * ((Math.exp(alpha * t2) - Math.exp(alpha * t1)) / alpha - dt),
-    );
-  });
-}
-
-// ----------------------------------------------------------------
-// Point generation via CDF table for g(r) ∝ e^(βr) − 1
-// ----------------------------------------------------------------
-function generatePoints(n: number, beta: number, seed: number): Point[] {
-  const rand = makePRNG(seed);
-  const pts: Point[] = new Array(n);
-
-  if (beta < 0.1) {
-    // g(r) ≈ βr → CDF ∝ r² → r = √u
-    for (let i = 0; i < n; i++) {
-      const r = Math.sqrt(rand());
-      const θ = rand() * 2 * Math.PI;
-      pts[i] = { x: r * Math.cos(θ), y: r * Math.sin(θ), r };
-    }
-    return pts;
-  }
-
-  // Build CDF lookup table
-  const TBL = 4000;
-  const cdf = new Float64Array(TBL + 1);
-  const step = 1 / TBL;
-  for (let i = 0; i <= TBL; i++) {
-    const r = i * step;
-    cdf[i] = (Math.exp(beta * r) - 1) / beta - r;
-  }
-  const total = cdf[TBL];
-  for (let i = 0; i <= TBL; i++) cdf[i] /= total;
-
-  for (let i = 0; i < n; i++) {
-    const u = rand();
-    let lo = 0, hi = TBL;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (cdf[mid] < u) lo = mid + 1; else hi = mid;
-    }
-    let r: number;
-    if (lo === 0) {
-      r = 0;
-    } else {
-      const c0 = cdf[lo - 1];
-      const c1 = cdf[lo];
-      const frac = c1 > c0 ? (u - c0) / (c1 - c0) : 0;
-      r = Math.max(0, Math.min(1, ((lo - 1) + frac) * step));
-    }
-    const θ = rand() * 2 * Math.PI;
-    pts[i] = { x: r * Math.cos(θ), y: r * Math.sin(θ), r };
-  }
-  return pts;
-}
-
-// ----------------------------------------------------------------
-// Bin points into rings
-// ----------------------------------------------------------------
-function computeBins(points: Point[], numBins: number): BinData {
-  const dr = 1 / numBins;
-  const counts = new Array(numBins).fill(0);
-  for (const p of points) {
-    const bin = Math.min(Math.floor(p.r / dr), numBins - 1);
-    counts[bin]++;
-  }
-  const areas = Array.from({ length: numBins }, (_, i) => {
-    const ri = i * dr;
-    const ro = (i + 1) * dr;
-    return Math.PI * (ro * ro - ri * ri);
-  });
-  const densities = counts.map((c, i) => (areas[i] > 0 ? c / areas[i] : 0));
-  return { counts, areas, densities, dr };
-}
-
-// ----------------------------------------------------------------
-// Tessellation:
-//   - ring width = ringYears mapped to r-space (dr = ringYears / T)
-//   - first cell is a circle of radius dr/2
-//   - subsequent rings of width dr
-//   - only slice a ring if its count > maxPts
-// ----------------------------------------------------------------
-function computeTessellation(
-  points: Point[], ringYears: number, maxPts: number, T: number,
-): TessRing[] {
-  const dr = ringYears / T;          // ring width in r-space [0,1]
-  const r0 = dr / 2;                 // first circle radius = half a ring width
-
-  // Build ring boundaries: [0, r0], [r0, r0+dr], [r0+2dr, ...], ... up to 1
-  const edges: number[] = [0, Math.min(r0, 1)];
-  let r = r0;
-  while (r < 1) {
-    r = Math.min(r + dr, 1);
-    edges.push(r);
-  }
-  const numRings = edges.length - 1;
-
-  // Count per ring
-  const ringCounts = new Array(numRings).fill(0);
-  for (const p of points) {
-    // First ring [0, r0), then uniform dr after that
-    let bin: number;
-    if (p.r < edges[1]) {
-      bin = 0;
-    } else {
-      bin = Math.min(
-        1 + Math.floor((p.r - edges[1]) / dr),
-        numRings - 1,
-      );
-    }
-    ringCounts[bin]++;
-  }
-
-  // Build tessellation rings
-  const rings: TessRing[] = [];
-  for (let i = 0; i < numRings; i++) {
-    const count = ringCounts[i];
-    const numSlices = count > maxPts
-      ? Math.max(2, Math.round(count / maxPts))
-      : 1;
-    rings.push({
-      rInner: edges[i],
-      rOuter: edges[i + 1],
-      numSlices,
-      sliceCounts: new Array(numSlices).fill(0),
-    });
-  }
-
-  // Assign each point to its cell
-  for (const p of points) {
-    let bin: number;
-    if (p.r < edges[1]) {
-      bin = 0;
-    } else {
-      bin = Math.min(
-        1 + Math.floor((p.r - edges[1]) / dr),
-        numRings - 1,
-      );
-    }
-    const ring = rings[bin];
-    if (ring.numSlices === 1) {
-      ring.sliceCounts[0]++;
-    } else {
-      let θ = Math.atan2(p.y, p.x);
-      if (θ < 0) θ += 2 * Math.PI;
-      const slice = Math.min(
-        Math.floor(θ / (2 * Math.PI) * ring.numSlices),
-        ring.numSlices - 1,
-      );
-      ring.sliceCounts[slice]++;
-    }
-  }
-
-  return rings;
-}
-
-// ----------------------------------------------------------------
-// Heatmap color: count → HSL  (blue=low → green → yellow → red=high)
-// ----------------------------------------------------------------
-function heatColor(count: number, maxCount: number, alpha: number): string {
-  if (count === 0) return `rgba(0,0,0,${alpha})`;
-  const t = Math.min(count / maxCount, 1);      // 0..1
-  // hue: 240 (blue) → 0 (red)
-  const h = (1 - t) * 240;
-  const s = 80 + t * 20;
-  const l = 25 + t * 30;
-  return `hsla(${h},${s}%,${l}%,${alpha})`;
-}
-
-// ----------------------------------------------------------------
-// Draw tessellation: heatmap fills + grid lines
-// ----------------------------------------------------------------
-function drawTessellation(canvas: HTMLCanvasElement, tess: TessRing[]) {
-  const ctx = canvas.getContext('2d')!;
-
-  // Find max count across all cells for color scale
-  let maxCount = 1;
-  for (const ring of tess) {
-    for (const c of ring.sliceCounts) {
-      if (c > maxCount) maxCount = c;
-    }
-  }
-
-  // --- Fill cells with heatmap ---
-  for (const ring of tess) {
-    const r1 = ring.rInner * SCALE;
-    const r2 = ring.rOuter * SCALE;
-    const sliceAngle = (2 * Math.PI) / ring.numSlices;
-
-    for (let s = 0; s < ring.numSlices; s++) {
-      const θ0 = s * sliceAngle;
-      const θ1 = θ0 + sliceAngle;
-
-      ctx.fillStyle = heatColor(ring.sliceCounts[s], maxCount, 0.45);
-      ctx.beginPath();
-      if (ring.rInner === 0) {
-        // Central circle — just an arc from 0
-        ctx.moveTo(HALF, HALF);
-        ctx.arc(HALF, HALF, r2, -θ1, -θ0);
-        ctx.closePath();
-      } else {
-        // Annular wedge
-        ctx.arc(HALF, HALF, r2, -θ1, -θ0);
-        ctx.arc(HALF, HALF, r1, -θ0, -θ1, true);
-        ctx.closePath();
-      }
-      ctx.fill();
-    }
-  }
-
-  // --- Grid lines on top ---
-  // Ring boundaries
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-  ctx.lineWidth = 0.5;
-  for (const ring of tess) {
-    const rPx = ring.rOuter * SCALE;
-    ctx.beginPath();
-    ctx.arc(HALF, HALF, rPx, 0, 2 * Math.PI);
-    ctx.stroke();
-  }
-
-  // Angular divisions
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-  ctx.lineWidth = 0.5;
-  ctx.beginPath();
-  for (const ring of tess) {
-    if (ring.numSlices <= 1) continue;
-    const r1 = ring.rInner * SCALE;
-    const r2 = ring.rOuter * SCALE;
-    for (let s = 0; s < ring.numSlices; s++) {
-      const θ = (s / ring.numSlices) * 2 * Math.PI;
-      const c = Math.cos(θ);
-      const sn = Math.sin(θ);
-      ctx.moveTo(HALF + r1 * c, HALF - r1 * sn);
-      ctx.lineTo(HALF + r2 * c, HALF - r2 * sn);
-    }
-  }
-  ctx.stroke();
-}
-
-// ----------------------------------------------------------------
-// Hit-test: pixel → cell
-// ----------------------------------------------------------------
-function findCell(
-  tess: TessRing[], wx: number, wy: number,
-): { ringIdx: number; sliceIdx: number } | null {
-  const r = Math.sqrt(wx * wx + wy * wy);
-  if (r > 1 || tess.length === 0) return null;
-
-  let ringIdx = -1;
-  for (let i = 0; i < tess.length; i++) {
-    if (r < tess[i].rOuter || i === tess.length - 1) { ringIdx = i; break; }
-  }
-  if (ringIdx < 0) return null;
-
-  const ring = tess[ringIdx];
-  let θ = Math.atan2(wy, wx);
-  if (θ < 0) θ += 2 * Math.PI;
-  const sliceIdx = Math.min(
-    Math.floor(θ / (2 * Math.PI) * ring.numSlices),
-    ring.numSlices - 1,
-  );
-  return { ringIdx, sliceIdx };
-}
-
-// ----------------------------------------------------------------
-// Draw ring histogram: bar chart of sliceCounts for one ring
-// ----------------------------------------------------------------
-function drawRingHistogram(
-  canvas: HTMLCanvasElement,
-  tess: TessRing[],
-  ringIdx: number,
-  maxPts: number,
-  startYear: number,
-  T: number,
-  selectedSlice: number | null,
-) {
-  const ctx = canvas.getContext('2d')!;
-  const W = canvas.width;
-  const H = canvas.height;
-  const pad = { t: 28, r: 12, b: 22, l: 44 };
-  const pW = W - pad.l - pad.r;
-  const pH = H - pad.t - pad.b;
-
-  ctx.fillStyle = '#141414';
-  ctx.fillRect(0, 0, W, H);
-
-  if (ringIdx < 0 || ringIdx >= tess.length) return;
-
-  const ring = tess[ringIdx];
-  const data = ring.sliceCounts;
-  const n = data.length;
-  const maxVal = Math.max(...data, maxPts, 1);
-  const barW = pW / n;
-
-  // Find global max for heatmap scale
-  let globalMax = 1;
-  for (const r of tess) for (const c of r.sliceCounts) if (c > globalMax) globalMax = c;
-
-  // Grid
-  ctx.strokeStyle = '#222';
-  ctx.lineWidth = 0.5;
-  for (let i = 1; i <= 4; i++) {
-    const y = pad.t + pH * (1 - i / 4);
-    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + pW, y); ctx.stroke();
-  }
-
-  // maxPts threshold line
-  const threshY = pad.t + pH * (1 - maxPts / maxVal);
-  ctx.strokeStyle = '#ff6b6b55';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 3]);
-  ctx.beginPath(); ctx.moveTo(pad.l, threshY); ctx.lineTo(pad.l + pW, threshY); ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Bars
-  for (let i = 0; i < n; i++) {
-    const barH = (data[i] / maxVal) * pH;
-    const x = pad.l + i * barW;
-    const y = pad.t + pH - barH;
-
-    ctx.fillStyle = heatColor(data[i], globalMax, 0.7);
-    ctx.fillRect(x + 0.5, y, barW - 1, barH);
-
-    // Highlight selected slice
-    if (i === selectedSlice) {
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x + 0.5, y, barW - 1, barH);
-    }
-  }
-
-  // Axes
-  ctx.strokeStyle = '#444';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + pH); ctx.lineTo(pad.l + pW, pad.t + pH);
-  ctx.stroke();
-
-  // Title
-  const y0 = Math.round(startYear + ring.rInner * T);
-  const y1 = Math.round(startYear + ring.rOuter * T);
-  ctx.fillStyle = '#ff8c42';
-  ctx.font = 'bold 11px monospace';
-  ctx.textAlign = 'left';
-  ctx.fillText(
-    `Ring ${ringIdx}: ${fmtYear(y0)}→${fmtYear(y1)}  (${n} slices, ${ring.sliceCounts.reduce((a, b) => a + b, 0)} pts)`,
-    pad.l, 16,
-  );
-
-  // Y labels
-  ctx.fillStyle = '#666';
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'right';
-  ctx.fillText(fmt(maxVal), pad.l - 4, pad.t + 10);
-  ctx.fillText('0', pad.l - 4, pad.t + pH + 3);
-
-  // X labels
-  ctx.textAlign = 'center';
-  ctx.fillText('slice 0', pad.l + barW / 2, H - 5);
-  ctx.fillText(String(n - 1), pad.l + pW - barW / 2, H - 5);
-
-  // maxPts label
-  ctx.fillStyle = '#ff6b6b88';
-  ctx.textAlign = 'left';
-  ctx.fillText(`max=${maxPts}`, pad.l + 4, threshY - 4);
-}
-
-// ----------------------------------------------------------------
-// Formatting
-// ----------------------------------------------------------------
-function fmt(n: number): string {
-  if (n === 0) return '0';
+function fmtCount(n: number): string {
   const a = Math.abs(n);
-  if (a >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (a >= 1e3) return (n / 1e3).toFixed(1) + 'k';
-  if (a >= 100) return n.toFixed(0);
-  if (a >= 1) return n.toFixed(1);
-  if (a >= 0.01) return n.toFixed(2);
-  return n.toExponential(1);
+  if (a >= 1e9) return (n / 1e9).toFixed(a >= 10e9 ? 0 : 1) + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(a >= 10e6 ? 0 : 1) + 'M';
+  if (a >= 1e3) return (n / 1e3).toFixed(a >= 10e3 ? 0 : 1) + 'K';
+  return n.toFixed(0);
 }
 
-function fmtYear(y: number): string {
-  const abs = Math.abs(y);
-  const s = abs >= 1000 ? (abs / 1000).toFixed(0) + 'k' : String(abs);
-  return y <= 0 ? s + ' BC' : String(y);
-}
-
-// ----------------------------------------------------------------
-// Combined chart: deaths per period (left axis) + density (right axis)
-// with model fit overlay on deaths
-// ----------------------------------------------------------------
-interface Series {
-  data: number[];
-  color: string;
-  label: string;
-  fill?: boolean;
-}
-
-function drawCombinedChart(
-  canvas: HTMLCanvasElement,
-  left: Series,                    // deaths per period (sampled)
-  right: Series,                   // grave density
-  modelOverlay: { data: number[]; label: string; color: string },
-  xLabels: { start: string; end: string },
-) {
-  const ctx = canvas.getContext('2d')!;
-  const W = canvas.width;
-  const H = canvas.height;
-  const pad = { t: 28, r: 52, b: 22, l: 52 };  // room for right axis
-  const pW = W - pad.l - pad.r;
-  const pH = H - pad.t - pad.b;
-  const n = left.data.length;
-  const barW = pW / n;
-
-  // background
-  ctx.fillStyle = '#141414';
-  ctx.fillRect(0, 0, W, H);
-
-  const maxL = Math.max(...left.data, ...modelOverlay.data, 1e-10);
-  const maxR = Math.max(...right.data, 1e-10);
-
-  // grid
-  ctx.strokeStyle = '#222';
-  ctx.lineWidth = 0.5;
-  for (let i = 1; i <= 4; i++) {
-    const y = pad.t + pH * (1 - i / 4);
-    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + pW, y); ctx.stroke();
+function fmtYearsAgo(y: number): string {
+  if (Math.abs(y) < 1) return 'now';
+  if (y >= 1000) {
+    const k = y / 1000;
+    return (k % 1 === 0 ? k.toFixed(0) : k.toFixed(1)) + 'k ya';
   }
-
-  // --- Left series: deaths (filled area + line) ---
-  ctx.fillStyle = left.color + '22';
-  ctx.beginPath();
-  ctx.moveTo(pad.l, pad.t + pH);
-  for (let i = 0; i < n; i++) {
-    ctx.lineTo(pad.l + (i + 0.5) * barW, pad.t + pH * (1 - left.data[i] / maxL));
-  }
-  ctx.lineTo(pad.l + pW, pad.t + pH);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.strokeStyle = left.color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const x = pad.l + (i + 0.5) * barW;
-    const y = pad.t + pH * (1 - left.data[i] / maxL);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  // --- Model overlay (dashed, same scale as left) ---
-  ctx.strokeStyle = modelOverlay.color;
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([5, 4]);
-  ctx.beginPath();
-  for (let i = 0; i < modelOverlay.data.length; i++) {
-    const x = pad.l + (i + 0.5) * barW;
-    const y = pad.t + pH * (1 - modelOverlay.data[i] / maxL);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // --- Right series: density (line only, own scale) ---
-  ctx.strokeStyle = right.color;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const x = pad.l + (i + 0.5) * barW;
-    const y = pad.t + pH * (1 - right.data[i] / maxR);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  // --- Axes ---
-  ctx.strokeStyle = '#444';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  // left axis
-  ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + pH);
-  // bottom
-  ctx.lineTo(pad.l + pW, pad.t + pH);
-  // right axis
-  ctx.lineTo(pad.l + pW, pad.t);
-  ctx.stroke();
-
-  // --- Labels ---
-  // left axis labels (deaths)
-  ctx.fillStyle = left.color;
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'right';
-  ctx.fillText(fmt(maxL), pad.l - 4, pad.t + 10);
-  ctx.fillText('0', pad.l - 4, pad.t + pH + 3);
-
-  // right axis labels (density)
-  ctx.fillStyle = right.color;
-  ctx.textAlign = 'left';
-  ctx.fillText(fmt(maxR), pad.l + pW + 4, pad.t + 10);
-  ctx.fillText('0', pad.l + pW + 4, pad.t + pH + 3);
-
-  // title / legend
-  ctx.font = 'bold 11px monospace';
-  ctx.textAlign = 'left';
-  ctx.fillStyle = left.color;
-  ctx.fillText(left.label, pad.l, 16);
-  const leftW = ctx.measureText(left.label).width;
-
-  ctx.fillStyle = '#444';
-  ctx.fillText(' | ', pad.l + leftW, 16);
-  const sepW = ctx.measureText(' | ').width;
-
-  ctx.fillStyle = right.color;
-  ctx.fillText(right.label, pad.l + leftW + sepW, 16);
-
-  // model legend (right-aligned)
-  ctx.fillStyle = modelOverlay.color;
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'right';
-  ctx.fillText(modelOverlay.label, pad.l + pW, 16);
-
-  // x-axis
-  ctx.fillStyle = '#666';
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'left';
-  ctx.fillText(xLabels.start, pad.l, H - 5);
-  ctx.textAlign = 'right';
-  ctx.fillText(xLabels.end, pad.l + pW, H - 5);
+  return y.toFixed(0) + ' ya';
 }
 
 // ----------------------------------------------------------------
-// Cloud drawing
+// SVG sector path
 // ----------------------------------------------------------------
-function drawCloud(canvas: HTMLCanvasElement, points: Point[]) {
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = '#0a0a0a';
-  ctx.fillRect(0, 0, S, S);
+function sectorPath(
+  cx: number, cy: number,
+  rInner: number, rOuter: number,
+  startAngle: number, endAngle: number,
+): string {
+  const span = endAngle - startAngle;
 
-  ctx.strokeStyle = '#1c1c1c';
-  ctx.lineWidth = 0.5;
-  ctx.fillStyle = '#2a2a2a';
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'left';
-  for (const frac of [0.25, 0.5, 0.75, 1.0]) {
-    const rad = frac * SCALE;
-    ctx.beginPath(); ctx.arc(HALF, HALF, rad, 0, 2 * Math.PI); ctx.stroke();
-    ctx.fillText(frac.toFixed(2), HALF + 3, HALF - rad + 12);
+  if (span >= 2 * Math.PI - 0.001) {
+    if (rInner < 0.5) {
+      return [
+        `M ${cx - rOuter} ${cy}`,
+        `A ${rOuter} ${rOuter} 0 1 1 ${cx + rOuter} ${cy}`,
+        `A ${rOuter} ${rOuter} 0 1 1 ${cx - rOuter} ${cy}`,
+        'Z',
+      ].join(' ');
+    }
+    return [
+      `M ${cx - rOuter} ${cy}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${cx + rOuter} ${cy}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${cx - rOuter} ${cy}`,
+      `M ${cx - rInner} ${cy}`,
+      `A ${rInner} ${rInner} 0 1 0 ${cx + rInner} ${cy}`,
+      `A ${rInner} ${rInner} 0 1 0 ${cx - rInner} ${cy}`,
+      'Z',
+    ].join(' ');
   }
 
-  ctx.fillStyle = 'rgba(220, 230, 240, 0.65)';
-  for (const p of points) {
-    ctx.fillRect(HALF + p.x * SCALE - 0.5, HALF - p.y * SCALE - 0.5, 1.5, 1.5);
+  const x1o = cx + rOuter * Math.cos(startAngle);
+  const y1o = cy + rOuter * Math.sin(startAngle);
+  const x2o = cx + rOuter * Math.cos(endAngle);
+  const y2o = cy + rOuter * Math.sin(endAngle);
+  const largeArc = span > Math.PI ? 1 : 0;
+
+  if (rInner < 0.5) {
+    return `M ${cx} ${cy} L ${x1o} ${y1o} A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${x2o} ${y2o} Z`;
   }
+
+  const x1i = cx + rInner * Math.cos(startAngle);
+  const y1i = cy + rInner * Math.sin(startAngle);
+  const x2i = cx + rInner * Math.cos(endAngle);
+  const y2i = cy + rInner * Math.sin(endAngle);
+
+  return [
+    `M ${x1o} ${y1o}`,
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${x2o} ${y2o}`,
+    `L ${x2i} ${y2i}`,
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${x1i} ${y1i}`,
+    'Z',
+  ].join(' ');
+}
+
+// ----------------------------------------------------------------
+// Bounding box of a circular sector
+// ----------------------------------------------------------------
+function sectorBBox(
+  cx: number, cy: number,
+  rMin: number, rMax: number,
+  a1: number, a2: number,
+): { x: number; y: number; w: number; h: number } {
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  const upd = (x: number, y: number) => {
+    if (x < xMin) xMin = x;
+    if (x > xMax) xMax = x;
+    if (y < yMin) yMin = y;
+    if (y > yMax) yMax = y;
+  };
+
+  for (const r of [rMin, rMax]) {
+    upd(cx + r * Math.cos(a1), cy + r * Math.sin(a1));
+    upd(cx + r * Math.cos(a2), cy + r * Math.sin(a2));
+  }
+
+  // Check cardinal angles (multiples of π/2) that fall within the arc
+  const step = Math.PI / 2;
+  const mStart = Math.ceil(a1 / step);
+  const mEnd = Math.floor(a2 / step);
+  for (let m = mStart; m <= mEnd; m++) {
+    const a = m * step;
+    if (a > a1 && a < a2) {
+      for (const r of [rMin, rMax]) {
+        upd(cx + r * Math.cos(a), cy + r * Math.sin(a));
+      }
+    }
+  }
+
+  return { x: xMin, y: yMin, w: xMax - xMin, h: yMax - yMin };
+}
+
+// ----------------------------------------------------------------
+// Focused chunk view
+// ----------------------------------------------------------------
+const RING_COLORS = ['#4ecdc4', '#ff8c42', '#c678dd', '#e06c75', '#61afef', '#98c379'];
+
+function FocusedView({
+  gy,
+  chunkInfo,
+}: {
+  gy: Graveyard;
+  chunkInfo: ChunkInfo;
+}) {
+  const { period: selP, chunkId: selC, neighbors } = chunkInfo;
+
+  // Rings: inner, selected, outer (when they exist)
+  const ringPeriods: number[] = [];
+  if (selP > 0) ringPeriods.push(selP - 1);
+  ringPeriods.push(selP);
+  if (selP < gy.numPeriods - 1) ringPeriods.push(selP + 1);
+  const nRings = ringPeriods.length;
+
+  // SVG layout
+  const R = 500;
+  const rMin = 150;
+  const rw = (R - rMin) / nRings;
+  const cx = R + 20;
+  const cy = R + 20;
+
+  // Collect all neighbor + selected addresses
+  const allAddrs: ChunkAddr[] = [
+    { period: selP, chunk: selC },
+    ...(neighbors.clockwise ? [neighbors.clockwise] : []),
+    ...(neighbors.anticlockwise ? [neighbors.anticlockwise] : []),
+    ...neighbors.inner.map(b => b.addr),
+    ...neighbors.outer.map(b => b.addr),
+  ];
+
+  // Build set of relevant chunks per ring: neighbors + 2 padding on each side
+  const relevantByPeriod = new Map<number, Set<number>>();
+  for (const pi of ringPeriods) relevantByPeriod.set(pi, new Set());
+  for (const addr of allAddrs) {
+    relevantByPeriod.get(addr.period)?.add(addr.chunk);
+  }
+  for (const [pi, chunks] of relevantByPeriod) {
+    const N = gy.chunksInPeriod(pi);
+    const expanded = new Set(chunks);
+    for (const c of chunks) {
+      for (let d = 1; d <= 2; d++) {
+        expanded.add((c - d + N) % N);
+        expanded.add((c + d) % N);
+      }
+    }
+    relevantByPeriod.set(pi, expanded);
+  }
+
+  // Compute visible angular extent from all relevant chunks
+  const selCenter = (chunkInfo.angleStart + chunkInfo.angleEnd) / 2;
+  let minAngle = selCenter, maxAngle = selCenter;
+  for (const [pi, chunks] of relevantByPeriod) {
+    const N = gy.chunksInPeriod(pi);
+    for (const ci of chunks) {
+      let a1 = (ci / N) * 2 * Math.PI;
+      let a2 = ((ci + 1) / N) * 2 * Math.PI;
+      // Handle wrap-around: keep angles near selCenter
+      while (a1 > selCenter + Math.PI) { a1 -= 2 * Math.PI; a2 -= 2 * Math.PI; }
+      while (a1 < selCenter - Math.PI) { a1 += 2 * Math.PI; a2 += 2 * Math.PI; }
+      minAngle = Math.min(minAngle, a1);
+      maxAngle = Math.max(maxAngle, a2);
+    }
+  }
+
+  const span = maxAngle - minAngle;
+  const fullCircle = span >= 2 * Math.PI * 0.85;
+
+  // Compute viewBox
+  let vb: string;
+  if (fullCircle) {
+    const s = 2 * (R + 20);
+    vb = `0 0 ${s} ${s}`;
+  } else {
+    const bb = sectorBBox(cx, cy, rMin, R, minAngle, maxAngle);
+    const pad = 25;
+    let vbW = bb.w + 2 * pad;
+    let vbH = bb.h + 2 * pad;
+    let vbX = bb.x - pad;
+    let vbY = bb.y - pad;
+    // Enforce min aspect ratio
+    const minW = vbH * 1.3;
+    if (vbW < minW) { vbX -= (minW - vbW) / 2; vbW = minW; }
+    const minH = vbW / 2.5;
+    if (vbH < minH) { vbY -= (minH - vbH) / 2; vbH = minH; }
+    vb = `${vbX} ${vbY} ${vbW} ${vbH}`;
+  }
+
+  // Highlight sets
+  const selectedKey = `${selP}:${selC}`;
+  const neighborSet = new Set(allAddrs.slice(1).map(a => `${a.period}:${a.chunk}`));
+
+  return (
+    <svg viewBox={vb} className="tess-svg" preserveAspectRatio="xMidYMid meet">
+      {ringPeriods.map((pi, ri) => {
+        const rI = rMin + ri * rw;
+        const rO = rMin + (ri + 1) * rw;
+        const N = gy.chunksInPeriod(pi);
+        const astep = (2 * Math.PI) / N;
+        const color = RING_COLORS[pi % RING_COLORS.length];
+        const relevant = relevantByPeriod.get(pi) || new Set();
+
+        const els: JSX.Element[] = [];
+
+        // Background arc
+        if (fullCircle) {
+          els.push(
+            <path key="bg" d={sectorPath(cx, cy, rI, rO, 0, 2 * Math.PI)}
+              fill={color} fillOpacity={0.04} stroke={color} strokeOpacity={0.12} strokeWidth={0.5} />
+          );
+        } else {
+          els.push(
+            <path key="bg" d={sectorPath(cx, cy, rI, rO, minAngle, maxAngle)}
+              fill={color} fillOpacity={0.04} stroke={color} strokeOpacity={0.12} strokeWidth={0.5} />
+          );
+        }
+
+        // Individual chunks at their true angles
+        for (const ci of relevant) {
+          let a1 = ci * astep;
+          let a2 = (ci + 1) * astep;
+          // Handle wrap-around
+          while (a1 > selCenter + Math.PI) { a1 -= 2 * Math.PI; a2 -= 2 * Math.PI; }
+          while (a1 < selCenter - Math.PI) { a1 += 2 * Math.PI; a2 += 2 * Math.PI; }
+
+          const key = `${pi}:${ci}`;
+          const isSel = key === selectedKey;
+          const isNb = neighborSet.has(key);
+
+          els.push(
+            <path key={`c${ci}`}
+              d={sectorPath(cx, cy, rI, rO, a1, a2)}
+              fill={isSel ? '#fff' : color}
+              fillOpacity={isSel ? 0.5 : isNb ? 0.4 : 0.1}
+              stroke={isSel ? '#fff' : isNb ? '#fff' : color}
+              strokeOpacity={isSel ? 1 : isNb ? 0.7 : 0.25}
+              strokeWidth={isSel ? 3 : isNb ? 2 : 0.5}
+            />
+          );
+        }
+
+        // Ring label
+        const labelAngle = fullCircle ? 0 : maxAngle + 0.04;
+        const labelR = (rI + rO) / 2;
+        els.push(
+          <text key="label"
+            x={cx + labelR * Math.cos(labelAngle)}
+            y={cy + labelR * Math.sin(labelAngle)}
+            textAnchor="start" dominantBaseline="central"
+            fill={color} fontSize={14} fontFamily="monospace" opacity={0.8}
+          >
+            P{pi} ({N > 999 ? fmtCount(N) : N})
+          </text>
+        );
+
+        return <g key={ri}>{els}</g>;
+      })}
+    </svg>
+  );
+}
+
+// ----------------------------------------------------------------
+// Boundary neighbor formatter
+// ----------------------------------------------------------------
+function BoundaryList({ label, items }: { label: string; items: BoundaryNeighbor[] }) {
+  if (items.length === 0) return (
+    <div className="tess-neighbor-row">
+      <span className="tess-n-label">{label}:</span>
+      <span className="tess-n-value">none</span>
+    </div>
+  );
+
+  const shown = items.length > 12 ? items.slice(0, 10) : items;
+  return (
+    <>
+      <div className="tess-neighbor-row">
+        <span className="tess-n-label">{label}:</span>
+        <span className="tess-n-value">{items.length} chunk{items.length > 1 ? 's' : ''}</span>
+      </div>
+      {shown.map((b, i) => (
+        <div key={i} className="tess-neighbor-detail">
+          ({b.addr.period}, {b.addr.chunk}): {b.localStart.toFixed(3)} &rarr; {b.localEnd.toFixed(3)}
+        </div>
+      ))}
+      {items.length > 12 && (
+        <div className="tess-neighbor-detail">... +{items.length - 10} more</div>
+      )}
+    </>
+  );
 }
 
 // ================================================================
 // Main component
 // ================================================================
 export default function App() {
-  // --- State ---
-  // nTotLog: log-scale slider value (exponent), range log10(100k)=5 to log10(1M)=6
-  const [nTotLog, setNTotLog] = useState(Math.log10(200000));
-  const nTot = Math.round(Math.pow(10, nTotLog));
-  const [alivePct, setAlivePct] = useState(5);     // % of nTot currently alive
-  const [startYear, setStartYear] = useState(-20000);
-  const [delta, setDelta] = useState(80);
-  const [numBins, setNumBins] = useState(100);
-  const [ringYears, setRingYears] = useState(500);
-  const [maxPts, setMaxPts] = useState(200);
-  const [seed, setSeed] = useState(42);
-  const [vpSize, setVpSize] = useState(0.20);
-  const [inspectRing, setInspectRing] = useState(0);
-  const [selectedCell, setSelectedCell] = useState<{ ringIdx: number; sliceIdx: number } | null>(null);
+  const [periodLength, setPeriodLength] = useState(75);
+  const [lastPeriodGraves, setLastPeriodGraves] = useState(5e9);
+  const [maxGraves, setMaxGraves] = useState(1000);
+  const [selectedPeriod, setSelectedPeriod] = useState(0);
+  const [selectedChunk, setSelectedChunk] = useState(0);
 
-  // nCurr = people alive now = alivePct% of nTot, dying over δ years
-  const nCurr = Math.round(nTot * alivePct / 100);
-
-  // --- Refs ---
-  const cloudRef = useRef<HTMLCanvasElement>(null);
-  const vpRef = useRef<HTMLCanvasElement>(null);
-  const offRef = useRef<HTMLCanvasElement | null>(null);
-  const chartRef = useRef<HTMLCanvasElement>(null);
-  const histRef = useRef<HTMLCanvasElement>(null);
-  const vpSizeRef = useRef(vpSize);
-  vpSizeRef.current = vpSize;
-  const lastMouseRef = useRef<{ wx: number; wy: number } | null>(null);
-  const startYearRef = useRef(startYear);
-  startYearRef.current = startYear;
-
-  // --- Derived model ---
-  const T = END_YEAR - startYear;
-  const model = useMemo(
-    () => solveModel(nTot, nCurr, T, delta),
-    [nTot, nCurr, T, delta],
+  const gy = useMemo(
+    () => new Graveyard(periodLength, lastPeriodGraves, maxGraves),
+    [periodLength, lastPeriodGraves, maxGraves],
   );
 
-  const points = useMemo(
-    () => generatePoints(nTot, model.beta, seed),
-    [nTot, model.beta, seed],
-  );
-  const pointsRef = useRef(points);
-  pointsRef.current = points;
+  // Chart data
+  const chartData = useMemo(() => {
+    const data: { yearsAgo: number; bar: number; line: number; chunks: number }[] = [];
+    for (let i = 0; i < gy.numPeriods; i++) {
+      const s = gy.periodStats(i);
+      data.push({ yearsAgo: s.yearsAgo, bar: s.graves, line: s.fTimesP, chunks: s.chunks });
+    }
+    return data;
+  }, [gy]);
 
-  const bins = useMemo(() => computeBins(points, numBins), [points, numBins]);
-
-  const tess = useMemo(
-    () => computeTessellation(points, ringYears, maxPts, T),
-    [points, ringYears, maxPts, T],
-  );
-
-  const fitCounts = useMemo(
-    () => modelExpectedCounts(model.A, model.alpha, T, numBins),
-    [model.A, model.alpha, T, numBins],
+  const totalChunks = useMemo(
+    () => { let s = 0; for (let i = 0; i < gy.numPeriods; i++) s += gy.chunksInPeriod(i); return s; },
+    [gy],
   );
 
-  // --- Draw cloud + tessellation to offscreen ---
-  useEffect(() => {
-    if (!offRef.current) {
-      offRef.current = document.createElement('canvas');
-      offRef.current.width = S;
-      offRef.current.height = S;
-    }
-    drawCloud(offRef.current, points);
-    drawTessellation(offRef.current, tess);
-    const ctx = cloudRef.current?.getContext('2d');
-    if (ctx) ctx.drawImage(offRef.current, 0, 0);
-  }, [points, tess]);
+  // Clamp selection
+  const safePeriod = Math.min(selectedPeriod, gy.numPeriods - 1);
+  const safePeriodChunks = gy.chunksInPeriod(safePeriod);
+  const safeChunk = Math.min(selectedChunk, Math.max(0, safePeriodChunks - 1));
 
-  // --- Draw chart ---
-  useEffect(() => {
-    const c = chartRef.current;
-    if (!c) return;
-    drawCombinedChart(
-      c,
-      { data: bins.counts, color: '#4ecdc4', label: 'deaths/period' },
-      { data: bins.densities, color: '#c678dd', label: 'density' },
-      { data: fitCounts, color: '#ffe066', label: `model α=${model.alpha.toExponential(2)}` },
-      { start: fmtYear(startYear), end: String(END_YEAR) },
-    );
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bins, fitCounts, model.alpha, startYear]);
+  // Get chunk info from the Graveyard class
+  const chunkInfo: ChunkInfo = useMemo(
+    () => gy.getChunkInfo(safePeriod, safeChunk),
+    [gy, safePeriod, safeChunk],
+  );
 
-  // --- Draw ring histogram ---
-  useEffect(() => {
-    const c = histRef.current;
-    if (!c || tess.length === 0) return;
-    const ri = Math.min(inspectRing, tess.length - 1);
-    drawRingHistogram(c, tess, ri, maxPts, startYear, T, selectedCell?.ringIdx === ri ? selectedCell.sliceIdx : null);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tess, inspectRing, maxPts, startYear, T, selectedCell]);
+  const xTicks = useMemo(() => {
+    const n = chartData.length;
+    if (n <= 10) return chartData.map(d => d.yearsAgo);
+    const step = Math.max(1, Math.floor(n / 7));
+    const ticks: number[] = [];
+    for (let i = n - 1; i >= 0; i -= step) ticks.push(chartData[i].yearsAgo);
+    if (!ticks.includes(chartData[0].yearsAgo)) ticks.push(chartData[0].yearsAgo);
+    return ticks.sort((a, b) => b - a);
+  }, [chartData]);
 
-  // Clamp inspectRing when tess changes
-  useEffect(() => {
-    if (inspectRing >= tess.length) setInspectRing(Math.max(0, tess.length - 1));
-  }, [tess.length, inspectRing]);
+  const selStats = gy.periodStats(safePeriod);
 
-  // --- Cloud click → select cell ---
-  const handleCloudClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = cloudRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const px = (e.clientX - rect.left) * (S / rect.width);
-    const py = (e.clientY - rect.top) * (S / rect.height);
-    const wx = (px - HALF) / SCALE;
-    const wy = (HALF - py) / SCALE;
-    const cell = findCell(tess, wx, wy);
-    if (cell) {
-      setSelectedCell(cell);
-      setInspectRing(cell.ringIdx);
-    } else {
-      setSelectedCell(null);
-    }
-  }, [tess]);
+  const totalNeighbors =
+    chunkInfo.neighbors.inner.length +
+    (chunkInfo.neighbors.clockwise ? 1 : 0) +
+    (chunkInfo.neighbors.anticlockwise ? 1 : 0) +
+    chunkInfo.neighbors.outer.length;
 
-  // --- Imperative overlay + viewport ---
-  const renderOverlay = useCallback((wx: number, wy: number) => {
-    const ctx = cloudRef.current?.getContext('2d');
-    if (!ctx || !offRef.current) return;
-    ctx.drawImage(offRef.current, 0, 0);
-
-    const vw = vpSizeRef.current;
-    const vh = vw * 3 / 4;
-    const rx = HALF + (wx - vw / 2) * SCALE;
-    const ry = HALF - (wy + vh / 2) * SCALE;
-
-    ctx.strokeStyle = '#4ecdc4';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 4]);
-    ctx.strokeRect(rx, ry, vw * SCALE, vh * SCALE);
-    ctx.setLineDash([]);
-
-    const cpx = HALF + wx * SCALE;
-    const cpy = HALF - wy * SCALE;
-    ctx.strokeStyle = 'rgba(78, 205, 196, 0.35)';
-    ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    ctx.moveTo(cpx - 8, cpy); ctx.lineTo(cpx + 8, cpy);
-    ctx.moveTo(cpx, cpy - 8); ctx.lineTo(cpx, cpy + 8);
-    ctx.stroke();
-  }, []);
-
-  const renderViewport = useCallback((wx: number, wy: number) => {
-    const vpCtx = vpRef.current?.getContext('2d');
-    if (!vpCtx) return;
-
-    const vw = vpSizeRef.current;
-    const vh = vw * 3 / 4;
-    const x1 = wx - vw / 2, x2 = wx + vw / 2;
-    const y1 = wy - vh / 2, y2 = wy + vh / 2;
-
-    vpCtx.fillStyle = '#0a0a0a';
-    vpCtx.fillRect(0, 0, VP_W, VP_H);
-
-    const pts = pointsRef.current;
-    let count = 0;
-    const dotR = Math.max(1.5, Math.min(6, 0.006 / vw * VP_W));
-
-    vpCtx.fillStyle = 'rgba(220, 230, 240, 0.8)';
-    for (const p of pts) {
-      if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
-        const vx = ((p.x - x1) / vw) * VP_W;
-        const vy = ((y2 - p.y) / vh) * VP_H;
-        vpCtx.beginPath();
-        vpCtx.arc(vx, vy, dotR, 0, 2 * Math.PI);
-        vpCtx.fill();
-        count++;
-      }
-    }
-
-    // Info bar
-    const r = Math.sqrt(wx * wx + wy * wy);
-    const sy = startYearRef.current;
-    const span = END_YEAR - sy;
-    const year = Math.round(sy + r * span);
-
-    vpCtx.fillStyle = '#0a0a0aCC';
-    vpCtx.fillRect(0, VP_H - 24, VP_W, 24);
-    vpCtx.fillStyle = '#4ecdc4';
-    vpCtx.font = '11px monospace';
-    vpCtx.textAlign = 'left';
-    vpCtx.fillText(
-      `${count} graves  ·  ~${fmtYear(year)} (r=${r.toFixed(2)})  ·  view ${vw.toFixed(2)}`,
-      8, VP_H - 8,
-    );
-  }, []);
-
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = cloudRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const px = (e.clientX - rect.left) * (S / rect.width);
-    const py = (e.clientY - rect.top) * (S / rect.height);
-    const wx = (px - HALF) / SCALE;
-    const wy = (HALF - py) / SCALE;
-    lastMouseRef.current = { wx, wy };
-    renderOverlay(wx, wy);
-    renderViewport(wx, wy);
-  }, [renderOverlay, renderViewport]);
-
-  const clearViewport = useCallback(() => {
-    const vpCtx = vpRef.current?.getContext('2d');
-    if (vpCtx) {
-      vpCtx.fillStyle = '#0a0a0a';
-      vpCtx.fillRect(0, 0, VP_W, VP_H);
-      vpCtx.fillStyle = '#333';
-      vpCtx.font = '12px monospace';
-      vpCtx.textAlign = 'center';
-      vpCtx.fillText('hover over the cloud above', VP_W / 2, VP_H / 2);
-    }
-  }, []);
-
-  const handleMouseLeave = useCallback(() => {
-    lastMouseRef.current = null;
-    const ctx = cloudRef.current?.getContext('2d');
-    if (ctx && offRef.current) ctx.drawImage(offRef.current, 0, 0);
-    clearViewport();
-  }, [clearViewport]);
-
-  // Refresh overlay when vpSize slider moves
-  useEffect(() => {
-    const m = lastMouseRef.current;
-    if (m) { renderOverlay(m.wx, m.wy); renderViewport(m.wx, m.wy); }
-  }, [vpSize, renderOverlay, renderViewport]);
-
-  // Initial viewport prompt
-  useEffect(() => { clearViewport(); }, [clearViewport]);
-
-  // --- Render ---
   return (
     <div className="app">
-      <h1 className="title">Graveyard — Density Explorer</h1>
+      <h1 className="title">Graveyard</h1>
       <p className="subtitle">
-        f(t) = A·(e<sup>αt</sup> − 1) &nbsp;|&nbsp;
-        α = {model.alpha.toExponential(3)} &nbsp;|&nbsp;
-        N<sub>curr</sub> = {nCurr.toLocaleString()} &nbsp;|&nbsp;
-        {fmtYear(startYear)} → {END_YEAR} &nbsp;({T.toLocaleString()} yrs)
+        Exponential model of {fmtCount(Graveyard.TOTAL_GRAVES)} human graves
+        &nbsp;&middot;&nbsp; span: {gy.totalSpan.toLocaleString()} years ({gy.numPeriods} periods)
+        &nbsp;&middot;&nbsp; &alpha; = {gy.alpha.toExponential(4)}
+        &nbsp;&middot;&nbsp; total chunks: {fmtCount(totalChunks)}
       </p>
 
       <div className="controls">
         <label className="ctrl">
-          <span>N<sub>tot</sub>: <b>{nTot.toLocaleString()}</b></span>
-          <input type="range" min={5} max={6} step={0.01}
-            value={nTotLog} onChange={e => setNTotLog(+e.target.value)} />
+          <span>Period length: <b>{periodLength} years</b></span>
+          <input type="range" min={25} max={500} step={5}
+            value={periodLength} onChange={e => setPeriodLength(+e.target.value)} />
         </label>
         <label className="ctrl">
-          <span>Alive: <b>{alivePct}%</b> ({nCurr.toLocaleString()})</span>
-          <input type="range" min={1} max={30} step={0.5}
-            value={alivePct} onChange={e => setAlivePct(+e.target.value)} />
+          <span>Graves in last period: <b>{fmtCount(lastPeriodGraves)}</b></span>
+          <input type="range" min={1e9} max={10e9} step={0.5e9}
+            value={lastPeriodGraves} onChange={e => setLastPeriodGraves(+e.target.value)} />
         </label>
         <label className="ctrl">
-          <span>δ (lifespan): <b>{delta}</b> yrs</span>
-          <input type="range" min={20} max={200} step={5}
-            value={delta} onChange={e => setDelta(+e.target.value)} />
+          <span>Max graves per chunk: <b>{maxGraves.toLocaleString()}</b></span>
+          <input type="range" min={100} max={100000} step={100}
+            value={maxGraves} onChange={e => setMaxGraves(+e.target.value)} />
         </label>
-        <label className="ctrl">
-          <span>Start: <b>{fmtYear(startYear)}</b></span>
-          <input type="range" min={-200000} max={-1000} step={1000}
-            value={startYear} onChange={e => setStartYear(+e.target.value)} />
-        </label>
-        <label className="ctrl">
-          <span>Bins: <b>{numBins}</b></span>
-          <input type="range" min={5} max={500} step={1}
-            value={numBins} onChange={e => setNumBins(+e.target.value)} />
-        </label>
-        <label className="ctrl">
-          <span>Ring: <b>{ringYears}</b> yrs ({tess.length} rings)</span>
-          <input type="range" min={50} max={2000} step={10}
-            value={ringYears} onChange={e => setRingYears(+e.target.value)} />
-        </label>
-        <label className="ctrl">
-          <span>Max/cell: <b>{maxPts}</b> ({tess.reduce((s, r) => s + r.numSlices, 0)} cells)</span>
-          <input type="range" min={5} max={2000} step={5}
-            value={maxPts} onChange={e => setMaxPts(+e.target.value)} />
-        </label>
-        <label className="ctrl">
-          <span>Viewport: <b>{vpSize.toFixed(2)}</b></span>
-          <input type="range" min={0.03} max={0.5} step={0.01}
-            value={vpSize} onChange={e => setVpSize(+e.target.value)} />
-        </label>
-        <button className="btn" onClick={() => setSeed(s => s + 1)}>
-          Regenerate
-        </button>
       </div>
 
-      <div className="main">
-        <div className="left-col">
-          <canvas
-            ref={cloudRef} className="cloud" width={S} height={S}
-            onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave}
-            onClick={handleCloudClick}
-          />
-          <canvas ref={vpRef} className="viewport" width={VP_W} height={VP_H} />
+      <h2 className="chart-title">Graves per period</h2>
+      <div className="chart-wrap">
+        <ResponsiveContainer width="100%" height={400}>
+          <ComposedChart data={chartData} margin={{ top: 16, right: 24, bottom: 20, left: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e1e1e" />
+            <XAxis dataKey="yearsAgo" type="number" domain={['dataMin', 'dataMax']}
+              reversed ticks={xTicks} tickFormatter={fmtYearsAgo}
+              tick={{ fill: '#666', fontSize: 11 }} stroke="#333"
+              label={{ value: 'years ago', position: 'insideBottom', offset: -10, fill: '#555', fontSize: 12 }} />
+            <YAxis scale="log" domain={['auto', 'auto']} allowDataOverflow
+              tickFormatter={fmtCount} tick={{ fill: '#666', fontSize: 11 }} stroke="#333" width={60} />
+            <Tooltip
+              contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 6, fontSize: 12 }}
+              labelFormatter={(v: number) => fmtYearsAgo(v)}
+              formatter={(value: number, name: string) => [fmtCount(value), name === 'bar' ? '∫ per period' : 'f(t) × period']} />
+            <Legend formatter={(v: string) => v === 'bar' ? '∫ per period' : 'f(t) × period'}
+              wrapperStyle={{ fontSize: 12, color: '#888' }} />
+            <Bar dataKey="bar" fill="rgba(78, 205, 196, 0.5)" stroke="rgba(78, 205, 196, 0.3)" isAnimationActive={false} />
+            <Line dataKey="line" stroke="#ff8c42" strokeWidth={2} dot={false} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      <h2 className="chart-title">Chunk inspector</h2>
+      <div className="tess-section">
+        <div className="tess-svg-wrap">
+          <FocusedView gy={gy} chunkInfo={chunkInfo} />
         </div>
-        <div className="charts">
-          <canvas ref={chartRef} width={420} height={280} />
 
-          <div className="ring-inspect">
-            <label className="ctrl">
-              <span>Inspect ring: <b>{Math.min(inspectRing, tess.length - 1)}</b> / {tess.length - 1}</span>
-              <input type="range" min={0} max={Math.max(0, tess.length - 1)} step={1}
-                value={Math.min(inspectRing, tess.length - 1)}
-                onChange={e => { setInspectRing(+e.target.value); setSelectedCell(null); }} />
-            </label>
+        <div className="tess-panel">
+          <label className="ctrl">
+            <span>Period: <b>{safePeriod}</b> / {gy.numPeriods - 1}</span>
+            <input type="range" min={0} max={gy.numPeriods - 1} step={1}
+              value={safePeriod}
+              onChange={e => { setSelectedPeriod(+e.target.value); setSelectedChunk(0); }} />
+          </label>
+
+          <div className="tess-info-grid">
+            <div className="tess-info-item">
+              <span className="tess-label">Time window</span>
+              <span className="tess-value">{fmtYearsAgo(selStats.yearsAgo + periodLength / 2)} &rarr; {fmtYearsAgo(selStats.yearsAgo - periodLength / 2)}</span>
+            </div>
+            <div className="tess-info-item">
+              <span className="tess-label">Graves</span>
+              <span className="tess-value">{fmtCount(chunkInfo.periodGraves)}</span>
+            </div>
+            <div className="tess-info-item">
+              <span className="tess-label">Chunks in period</span>
+              <span className="tess-value">{chunkInfo.periodChunks.toLocaleString()}</span>
+            </div>
+            <div className="tess-info-item">
+              <span className="tess-label">Graves / chunk</span>
+              <span className="tess-value">{fmtCount(chunkInfo.graves)}</span>
+            </div>
           </div>
-          <canvas ref={histRef} width={420} height={180} />
 
-          {selectedCell && tess[selectedCell.ringIdx] && (() => {
-            const ring = tess[selectedCell.ringIdx];
-            const count = ring.sliceCounts[selectedCell.sliceIdx];
-            const y0 = Math.round(startYear + ring.rInner * T);
-            const y1 = Math.round(startYear + ring.rOuter * T);
-            return (
-              <div className="cell-info">
-                <b>Selected cell</b>
-                &nbsp;Ring {selectedCell.ringIdx} ({fmtYear(y0)} → {fmtYear(y1)})
-                &nbsp;·&nbsp;Slice {selectedCell.sliceIdx}/{ring.numSlices}
-                &nbsp;·&nbsp;<b>{count.toLocaleString()}</b> graves
-              </div>
-            );
-          })()}
+          <label className="ctrl">
+            <span>Chunk angular ID: <b>{safeChunk}</b> / {Math.max(0, safePeriodChunks - 1)}</span>
+            <input type="range" min={0} max={Math.max(0, safePeriodChunks - 1)} step={1}
+              value={safeChunk}
+              onChange={e => setSelectedChunk(+e.target.value)} />
+          </label>
+
+          <div className="tess-neighbors">
+            <h3>Neighbors of ({safePeriod}, {safeChunk}) &mdash; {totalNeighbors} total</h3>
+
+            <BoundaryList label="Inner boundary" items={chunkInfo.neighbors.inner} />
+
+            <div className="tess-neighbor-row">
+              <span className="tess-n-label">Clockwise:</span>
+              <span className="tess-n-value">
+                {chunkInfo.neighbors.clockwise
+                  ? `(${chunkInfo.neighbors.clockwise.period}, ${chunkInfo.neighbors.clockwise.chunk})`
+                  : 'none'}
+              </span>
+            </div>
+            <div className="tess-neighbor-row">
+              <span className="tess-n-label">Anticlockwise:</span>
+              <span className="tess-n-value">
+                {chunkInfo.neighbors.anticlockwise
+                  ? `(${chunkInfo.neighbors.anticlockwise.period}, ${chunkInfo.neighbors.anticlockwise.chunk})`
+                  : 'none'}
+              </span>
+            </div>
+
+            <BoundaryList label="Outer boundary" items={chunkInfo.neighbors.outer} />
+          </div>
         </div>
       </div>
     </div>
