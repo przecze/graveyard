@@ -1,0 +1,296 @@
+{
+  "-10000": {
+    "HYDE": "2M",
+    "McEvedy & Jones": "4M",
+    "Thomlinson": "1–10M",
+    "Gapminder": "4M"
+  },
+  "-9000": {
+    "HYDE": "4M"
+  },
+  "-8000": {
+    "PRB": "5M",
+    "HYDE": "5M",
+    "Durand": "5–10M"
+  },
+  "-7000": {
+    "PRB": "7M",
+    "HYDE": "8M"
+  },
+  "-6000": {
+    "PRB": "14M",
+    "HYDE": "11M"
+  },
+  "-5000": {
+    "PRB": "27M",
+    "HYDE": "18M",
+    "McEvedy & Jones": "5M",
+    "Thomlinson": "5–20M",
+    "Gapminder": "5M"
+  },
+  "-4000": {
+    "PRB": "50M",
+    "HYDE": "28M",
+    "McEvedy & Jones": "7M",
+    "Gapminder": "7M"
+  },
+  "-3000": {
+    "PRB": "100M",
+    "HYDE": "45M",
+    "McEvedy & Jones": "14M",
+    "Gapminder": "14M"
+  },
+  "-2000": {
+    "HYDE": "72M",
+    "McEvedy & Jones": "27M",
+    "Gapminder": "27M"
+  },
+  "-1000": {
+    "PRB": "100M",
+    "HYDE": "115M",
+    "McEvedy & Jones": "50M",
+    "Gapminder": "50M"
+  },
+  "-500": {
+    "PRB": "150M"
+  },
+  "-200": {
+    "PRB": "227M",
+    "McEvedy & Jones": "150M",
+    "Gapminder": "150M"
+  },
+  "1": {
+    "PRB": "300M",
+    "UN": "300M",
+    "Maddison": "226M",
+    "HYDE": "188M",
+    "Biraben": "255M",
+    "McEvedy & Jones": "170M",
+    "Thomlinson": "226",
+    "Durand": "270–330M",
+    "Clark": "256M",
+    "Gapminder": "170M"
+  },
+  "100": {
+    "HYDE": "195M"
+  },
+  "200": {
+    "HYDE": "202M",
+    "Biraben": "256M",
+    "McEvedy & Jones": "190M",
+    "Gapminder": "190M"
+  },
+  "300": {
+    "HYDE": "205M"
+  },
+  "350": {
+    "Clark": "254M"
+  },
+  "400": {
+    "HYDE": "209M",
+    "Biraben": "206M",
+    "McEvedy & Jones": "190M",
+    "Gapminder": "190M"
+  },
+  "500": {
+    "PRB": "280M",
+    "HYDE": "210M",
+    "Biraben": "206M",
+    "McEvedy & Jones": "190M",
+    "Gapminder": "190M"
+  },
+  "600": {
+    "HYDE": "213M",
+    "Biraben": "206M",
+    "McEvedy & Jones": "200M",
+    "Clark": "237M",
+    "Gapminder": "200M"
+  },
+  "700": {
+    "HYDE": "226M",
+    "Biraben": "207M",
+    "McEvedy & Jones": "210M",
+    "Gapminder": "207M"
+  },
+  "800": {
+    "HYDE": "240M",
+    "Biraben": "224M",
+    "McEvedy & Jones": "220M",
+    "Clark": "261M",
+    "Gapminder": "224M"
+  },
+  "900": {
+    "HYDE": "269M",
+    "Biraben": "226M",
+    "McEvedy & Jones": "240M",
+    "Gapminder": "226M"
+  },
+  "1000": {
+    "PRB": "400M",
+    "UN": "310M",
+    "Maddison": "267M",
+    "HYDE": "295M",
+    "Biraben": "254M",
+    "McEvedy & Jones": "265M",
+    "Durand": "275–345M",
+    "Clark": "280M",
+    "Gapminder": "254M"
+  },
+  "1100": {
+    "PRB": "450M",
+    "HYDE": "353M",
+    "Biraben": "301M",
+    "McEvedy & Jones": "320M",
+    "Gapminder": "301M"
+  },
+  "1200": {
+    "PRB": "500M",
+    "HYDE": "393M",
+    "Biraben": "400M",
+    "McEvedy & Jones": "360M",
+    "Clark": "384M",
+    "Gapminder": "400M"
+  },
+  "1250": {
+    "UN": "400M",
+    "Biraben": "416M",
+    "Gapminder": "416M"
+  },
+  "1300": {
+    "PRB": "500M",
+    "HYDE": "392M",
+    "Biraben": "432M",
+    "McEvedy & Jones": "360M",
+    "Thomlinson": "400M",
+    "Gapminder": "432M"
+  },
+  "1340": {
+    "Biraben": "443M",
+    "Clark": "378M",
+    "Gapminder": "443M"
+  },
+  "1400": {
+    "PRB": "500M",
+    "HYDE": "390M",
+    "Biraben": "374M",
+    "McEvedy & Jones": "350M",
+    "Gapminder": "374M"
+  },
+  "1500": {
+    "PRB": "600M",
+    "UN": "500M",
+    "Maddison": "438M",
+    "HYDE": "461M",
+    "Biraben": "425M",
+    "Durand": "440–540M",
+    "Clark": "427M",
+    "Gapminder": "460M"
+  },
+  "1600": {
+    "PRB": "600M",
+    "Maddison": "556M",
+    "HYDE": "554M",
+    "Biraben": "579M",
+    "McEvedy & Jones": "545M",
+    "Clark": "498M",
+    "Gapminder": "579M"
+  },
+  "1650": {
+    "PRB": "<700M",
+    "McEvedy & Jones": "545M",
+    "Thomlinson": "500M",
+    "Clark": "516M",
+    "Gapminder": "579M"
+  },
+  "1700": {
+    "PRB": "660M",
+    "Maddison": "603M",
+    "HYDE": "603M",
+    "Biraben": "1079M",
+    "McEvedy & Jones": "1010M",
+    "Thomlinson": "1000M",
+    "Clark": "1041M",
+    "Gapminder": "1079M"
+  },
+  "1750": {
+    "UN": "791M",
+    "HYDE": "814M",
+    "Thomlinson": "700M",
+    "Gapminder": "770M"
+  },
+  "1800": {
+    "PRB": "1000M",
+    "UN": "978M",
+    "HYDE": "989M",
+    "Thomlinson": "900M",
+    "Gapminder": "985M"
+  },
+  "1820": {
+    "Maddison": "1042M",
+    "Gapminder": "1093M"
+  },
+  "1850": {
+    "PRB": "1265M",
+    "UN": "1262M",
+    "Maddison": "1189M",
+    "HYDE": "1263M",
+    "Biraben": "1241M",
+    "McEvedy & Jones": "1200M",
+    "Thomlinson": "1200M",
+    "Gapminder": "1278M"
+  },
+  "1870": {
+    "Maddison": "1272M",
+    "Gapminder": "1347M"
+  },
+  "1875": {
+    "McEvedy & Jones": "1325M",
+    "Gapminder": "1383M"
+  },
+  "1900": {
+    "PRB": "1656M",
+    "UN": "1650M",
+    "Maddison": "1547M",
+    "HYDE": "1654M",
+    "Biraben": "1633M",
+    "McEvedy & Jones": "1625M",
+    "Thomlinson": "1600M",
+    "Durand": "1650–1710M",
+    "Clark": "1668M",
+    "Gapminder": "1645M"
+  },
+  "1910": {
+    "UN": "1750M",
+    "HYDE": "1777M",
+    "Gapminder": "1790M"
+  },
+  "1913": {
+    "Maddison": "1793M",
+    "Gapminder": "1829M"
+  },
+  "1920": {
+    "UN": "1860M",
+    "Maddison": "1935M",
+    "HYDE": "1912M",
+    "Clark": "1968M",
+    "Gapminder": "1924M"
+  },
+  "1925": {
+    "PRB": "2000M",
+    "McEvedy & Jones": "2000M",
+    "Gapminder": "2007M"
+  },
+  "1930": {
+    "UN": "2070M",
+    "HYDE": "2092M",
+    "Clark": "2145M",
+    "Gapminder": "2100M"
+  },
+  "1940": {
+    "UN": "2300M",
+    "Maddison": "2240M",
+    "HYDE": "2307M",
+    "Clark": "2340M",
+    "Gapminder": "2324M"
+  }
+}

@@ -1,9 +1,6 @@
 import { useState, useMemo } from 'react';
-import {
-  ComposedChart, Bar, Line, XAxis, YAxis,
-  CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-} from 'recharts';
 import { Graveyard, type ChunkInfo, type ChunkAddr, type BoundaryNeighbor } from './graveyard';
+import PopulationChart from './PopulationChart';
 import './App.css';
 
 // ----------------------------------------------------------------
@@ -17,13 +14,12 @@ function fmtCount(n: number): string {
   return n.toFixed(0);
 }
 
-function fmtYearsAgo(y: number): string {
-  if (Math.abs(y) < 1) return 'now';
-  if (y >= 1000) {
-    const k = y / 1000;
-    return (k % 1 === 0 ? k.toFixed(0) : k.toFixed(1)) + 'k ya';
-  }
-  return y.toFixed(0) + ' ya';
+const CURRENT_YEAR = 2026;
+
+function fmtCalendarYear(yearsAgo: number): string {
+  const year = Math.round(CURRENT_YEAR - yearsAgo);
+  if (year <= 0) return `${Math.abs(year - 1)} BC`;
+  return `${year} AD`;
 }
 
 // ----------------------------------------------------------------
@@ -81,46 +77,12 @@ function sectorPath(
 }
 
 // ----------------------------------------------------------------
-// Bounding box of a circular sector
-// ----------------------------------------------------------------
-function sectorBBox(
-  cx: number, cy: number,
-  rMin: number, rMax: number,
-  a1: number, a2: number,
-): { x: number; y: number; w: number; h: number } {
-  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-  const upd = (x: number, y: number) => {
-    if (x < xMin) xMin = x;
-    if (x > xMax) xMax = x;
-    if (y < yMin) yMin = y;
-    if (y > yMax) yMax = y;
-  };
-
-  for (const r of [rMin, rMax]) {
-    upd(cx + r * Math.cos(a1), cy + r * Math.sin(a1));
-    upd(cx + r * Math.cos(a2), cy + r * Math.sin(a2));
-  }
-
-  // Check cardinal angles (multiples of π/2) that fall within the arc
-  const step = Math.PI / 2;
-  const mStart = Math.ceil(a1 / step);
-  const mEnd = Math.floor(a2 / step);
-  for (let m = mStart; m <= mEnd; m++) {
-    const a = m * step;
-    if (a > a1 && a < a2) {
-      for (const r of [rMin, rMax]) {
-        upd(cx + r * Math.cos(a), cy + r * Math.sin(a));
-      }
-    }
-  }
-
-  return { x: xMin, y: yMin, w: xMax - xMin, h: yMax - yMin };
-}
-
-// ----------------------------------------------------------------
-// Focused chunk view
+// Focused chunk view — fixed 200×200 year canvas, no rotation/rescaling
 // ----------------------------------------------------------------
 const RING_COLORS = ['#4ecdc4', '#ff8c42', '#c678dd', '#e06c75', '#61afef', '#98c379'];
+const CANVAS_YEARS = 400;
+const HALF = CANVAS_YEARS / 2;
+const DIAG = HALF * Math.SQRT2; // ~141 years — max distance from view center to corner
 
 function FocusedView({
   gy,
@@ -130,156 +92,230 @@ function FocusedView({
   chunkInfo: ChunkInfo;
 }) {
   const { period: selP, chunkId: selC, neighbors } = chunkInfo;
+  const P = gy.periodLength;
 
-  // Rings: inner, selected, outer (when they exist)
-  const ringPeriods: number[] = [];
-  if (selP > 0) ringPeriods.push(selP - 1);
-  ringPeriods.push(selP);
-  if (selP < gy.numPeriods - 1) ringPeriods.push(selP + 1);
-  const nRings = ringPeriods.length;
+  // Center of selected chunk in year-coordinate space (tessellation origin = 0,0)
+  const rMid = (selP + 0.5) * P;
+  const thetaMid = (chunkInfo.angleStart + chunkInfo.angleEnd) / 2;
+  const viewCx = rMid * Math.cos(thetaMid);
+  const viewCy = rMid * Math.sin(thetaMid);
 
-  // SVG layout
-  const R = 500;
-  const rMin = 150;
-  const rw = (R - rMin) / nRings;
-  const cx = R + 20;
-  const cy = R + 20;
+  // Fixed viewBox — always 200×200 years centered on selected chunk
+  const vb = `${viewCx - HALF} ${viewCy - HALF} ${CANVAS_YEARS} ${CANVAS_YEARS}`;
 
-  // Collect all neighbor + selected addresses
-  const allAddrs: ChunkAddr[] = [
-    { period: selP, chunk: selC },
+  // Visible radial range
+  const minR = Math.max(0, rMid - DIAG);
+  const maxR = rMid + DIAG;
+  const minPeriod = Math.max(0, Math.floor(minR / P));
+  const maxPeriod = Math.min(gy.numPeriods - 1, Math.ceil(maxR / P));
+
+  // Highlight sets
+  const allNeighborAddrs: ChunkAddr[] = [
     ...(neighbors.clockwise ? [neighbors.clockwise] : []),
     ...(neighbors.anticlockwise ? [neighbors.anticlockwise] : []),
     ...neighbors.inner.map(b => b.addr),
     ...neighbors.outer.map(b => b.addr),
   ];
-
-  // Build set of relevant chunks per ring: neighbors + 2 padding on each side
-  const relevantByPeriod = new Map<number, Set<number>>();
-  for (const pi of ringPeriods) relevantByPeriod.set(pi, new Set());
-  for (const addr of allAddrs) {
-    relevantByPeriod.get(addr.period)?.add(addr.chunk);
-  }
-  for (const [pi, chunks] of relevantByPeriod) {
-    const N = gy.chunksInPeriod(pi);
-    const expanded = new Set(chunks);
-    for (const c of chunks) {
-      for (let d = 1; d <= 2; d++) {
-        expanded.add((c - d + N) % N);
-        expanded.add((c + d) % N);
-      }
-    }
-    relevantByPeriod.set(pi, expanded);
-  }
-
-  // Compute visible angular extent from all relevant chunks
-  const selCenter = (chunkInfo.angleStart + chunkInfo.angleEnd) / 2;
-  let minAngle = selCenter, maxAngle = selCenter;
-  for (const [pi, chunks] of relevantByPeriod) {
-    const N = gy.chunksInPeriod(pi);
-    for (const ci of chunks) {
-      let a1 = (ci / N) * 2 * Math.PI;
-      let a2 = ((ci + 1) / N) * 2 * Math.PI;
-      // Handle wrap-around: keep angles near selCenter
-      while (a1 > selCenter + Math.PI) { a1 -= 2 * Math.PI; a2 -= 2 * Math.PI; }
-      while (a1 < selCenter - Math.PI) { a1 += 2 * Math.PI; a2 += 2 * Math.PI; }
-      minAngle = Math.min(minAngle, a1);
-      maxAngle = Math.max(maxAngle, a2);
-    }
-  }
-
-  const span = maxAngle - minAngle;
-  const fullCircle = span >= 2 * Math.PI * 0.85;
-
-  // Compute viewBox
-  let vb: string;
-  if (fullCircle) {
-    const s = 2 * (R + 20);
-    vb = `0 0 ${s} ${s}`;
-  } else {
-    const bb = sectorBBox(cx, cy, rMin, R, minAngle, maxAngle);
-    const pad = 25;
-    let vbW = bb.w + 2 * pad;
-    let vbH = bb.h + 2 * pad;
-    let vbX = bb.x - pad;
-    let vbY = bb.y - pad;
-    // Enforce min aspect ratio
-    const minW = vbH * 1.3;
-    if (vbW < minW) { vbX -= (minW - vbW) / 2; vbW = minW; }
-    const minH = vbW / 2.5;
-    if (vbH < minH) { vbY -= (minH - vbH) / 2; vbH = minH; }
-    vb = `${vbX} ${vbY} ${vbW} ${vbH}`;
-  }
-
-  // Highlight sets
   const selectedKey = `${selP}:${selC}`;
-  const neighborSet = new Set(allAddrs.slice(1).map(a => `${a.period}:${a.chunk}`));
+  const neighborSet = new Set(allNeighborAddrs.map(a => `${a.period}:${a.chunk}`));
 
   return (
     <svg viewBox={vb} className="tess-svg" preserveAspectRatio="xMidYMid meet">
-      {ringPeriods.map((pi, ri) => {
-        const rI = rMin + ri * rw;
-        const rO = rMin + (ri + 1) * rw;
-        const N = gy.chunksInPeriod(pi);
-        const astep = (2 * Math.PI) / N;
+      {Array.from({ length: maxPeriod - minPeriod + 1 }, (_, i) => {
+        const pi = minPeriod + i;
+        const rI = pi * P;
+        const rO = (pi + 1) * P;
+        const Npi = gy.chunksInPeriod(pi);
+        const astep = (2 * Math.PI) / Npi;
+        const piOff = gy.chunkOffset(pi); // 0.5 for odd periods
         const color = RING_COLORS[pi % RING_COLORS.length];
-        const relevant = relevantByPeriod.get(pi) || new Set();
+        const rCenter = (rI + rO) / 2;
 
         const els: JSX.Element[] = [];
 
-        // Background arc
-        if (fullCircle) {
-          els.push(
-            <path key="bg" d={sectorPath(cx, cy, rI, rO, 0, 2 * Math.PI)}
-              fill={color} fillOpacity={0.04} stroke={color} strokeOpacity={0.12} strokeWidth={0.5} />
-          );
+        // Visible angular margin at this ring's radius
+        const angMargin = rCenter > 1 ? DIAG / rCenter + astep * 2 : Math.PI;
+        const clampedMargin = Math.min(angMargin, Math.PI);
+
+        // Ring background band
+        els.push(
+          <path key="bg"
+            d={sectorPath(0, 0, rI, rO,
+              thetaMid - clampedMargin, thetaMid + clampedMargin)}
+            fill={color} fillOpacity={0.04}
+            stroke={color} strokeOpacity={0.12} strokeWidth={0.3}
+          />
+        );
+
+        // Arc length per chunk (years) at ring center
+        const arcLen = (2 * Math.PI * rCenter) / Npi;
+
+        // Only draw individual chunk outlines if they're large enough to see
+        const drawAll = arcLen > 0.4;
+
+        if (drawAll) {
+          const minIdx = Math.floor((thetaMid - clampedMargin) / astep - piOff) - 1;
+          const maxIdx = Math.ceil((thetaMid + clampedMargin) / astep - piOff) + 1;
+          for (let ci = minIdx; ci <= maxIdx; ci++) {
+            const wci = ((ci % Npi) + Npi) % Npi; // wrapped chunk id
+            const a1 = (ci + piOff) * astep;
+            const a2 = (ci + 1 + piOff) * astep;
+            const key = `${pi}:${wci}`;
+            const isSel = key === selectedKey;
+            const isNb = neighborSet.has(key);
+
+            els.push(
+              <path key={`c${ci}`}
+                d={sectorPath(0, 0, rI, rO, a1, a2)}
+                fill={isSel ? '#fff' : color}
+                fillOpacity={isSel ? 0.5 : isNb ? 0.4 : 0.08}
+                stroke={isSel ? '#fff' : isNb ? '#fff' : color}
+                strokeOpacity={isSel ? 1 : isNb ? 0.7 : 0.2}
+                strokeWidth={isSel ? 1.5 : isNb ? 1 : 0.2}
+              />
+            );
+          }
         } else {
-          els.push(
-            <path key="bg" d={sectorPath(cx, cy, rI, rO, minAngle, maxAngle)}
-              fill={color} fillOpacity={0.04} stroke={color} strokeOpacity={0.12} strokeWidth={0.5} />
-          );
+          // Chunks too small to draw individually — only highlight selected + neighbors
+          const toHighlight: { c: number; isSel: boolean }[] = [];
+          if (selP === pi) toHighlight.push({ c: selC, isSel: true });
+          for (const addr of allNeighborAddrs) {
+            if (addr.period === pi) toHighlight.push({ c: addr.chunk, isSel: false });
+          }
+          for (let hi = 0; hi < toHighlight.length; hi++) {
+            const { c, isSel } = toHighlight[hi];
+            let a1 = (c + piOff) * astep;
+            // Wrap near thetaMid
+            while (a1 - thetaMid > Math.PI) a1 -= 2 * Math.PI;
+            while (thetaMid - a1 > Math.PI) a1 += 2 * Math.PI;
+            const a2 = a1 + astep;
+            els.push(
+              <path key={`h${hi}`}
+                d={sectorPath(0, 0, rI, rO, a1, a2)}
+                fill={isSel ? '#fff' : color}
+                fillOpacity={isSel ? 0.5 : 0.4}
+                stroke={isSel ? '#fff' : '#fff'}
+                strokeOpacity={isSel ? 1 : 0.7}
+                strokeWidth={isSel ? 1.5 : 1}
+              />
+            );
+          }
         }
 
-        // Individual chunks at their true angles
-        for (const ci of relevant) {
-          let a1 = ci * astep;
-          let a2 = (ci + 1) * astep;
-          // Handle wrap-around
-          while (a1 > selCenter + Math.PI) { a1 -= 2 * Math.PI; a2 -= 2 * Math.PI; }
-          while (a1 < selCenter - Math.PI) { a1 += 2 * Math.PI; a2 += 2 * Math.PI; }
-
-          const key = `${pi}:${ci}`;
-          const isSel = key === selectedKey;
-          const isNb = neighborSet.has(key);
-
-          els.push(
-            <path key={`c${ci}`}
-              d={sectorPath(cx, cy, rI, rO, a1, a2)}
-              fill={isSel ? '#fff' : color}
-              fillOpacity={isSel ? 0.5 : isNb ? 0.4 : 0.1}
-              stroke={isSel ? '#fff' : isNb ? '#fff' : color}
-              strokeOpacity={isSel ? 1 : isNb ? 0.7 : 0.25}
-              strokeWidth={isSel ? 3 : isNb ? 2 : 0.5}
-            />
-          );
-        }
-
-        // Ring label
-        const labelAngle = fullCircle ? 0 : maxAngle + 0.04;
-        const labelR = (rI + rO) / 2;
+        // Period label at the right edge of the visible band
+        const labelA = thetaMid + clampedMargin * 0.85;
+        const labelR = rCenter;
+        const fontSize = Math.min(4, P * 0.3);
         els.push(
           <text key="label"
-            x={cx + labelR * Math.cos(labelAngle)}
-            y={cy + labelR * Math.sin(labelAngle)}
+            x={labelR * Math.cos(labelA)}
+            y={labelR * Math.sin(labelA)}
             textAnchor="start" dominantBaseline="central"
-            fill={color} fontSize={14} fontFamily="monospace" opacity={0.8}
+            fill={color} fontSize={fontSize} fontFamily="monospace" opacity={0.7}
           >
-            P{pi} ({N > 999 ? fmtCount(N) : N})
+            P{pi}
           </text>
         );
 
-        return <g key={ri}>{els}</g>;
+        return <g key={pi}>{els}</g>;
       })}
+    </svg>
+  );
+}
+
+// ----------------------------------------------------------------
+// Solo chunk view — 4× zoom, auto-height to fit the chunk
+// ----------------------------------------------------------------
+const SOLO_SCALE = 4; // 4× zoom compared to the neighbourhood canvas
+const SOLO_W = 1000 / SOLO_SCALE;  // years wide (fixed horizontal span)
+
+/** Bounding box of a sector arc centered at origin. */
+function sectorBBox(
+  rI: number, rO: number, a1: number, a2: number,
+): { x: number; y: number; w: number; h: number } {
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  const upd = (x: number, y: number) => {
+    if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+    if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+  };
+  for (const r of [rI, rO]) {
+    upd(r * Math.cos(a1), r * Math.sin(a1));
+    upd(r * Math.cos(a2), r * Math.sin(a2));
+  }
+  const step = Math.PI / 2;
+  for (let m = Math.ceil(a1 / step); m <= Math.floor(a2 / step); m++) {
+    const a = m * step;
+    if (a > a1 && a < a2) {
+      for (const r of [rI, rO]) upd(r * Math.cos(a), r * Math.sin(a));
+    }
+  }
+  // For a full circle or pie slice that includes the origin
+  if (rI < 0.5) upd(0, 0);
+  return { x: xMin, y: yMin, w: xMax - xMin, h: yMax - yMin };
+}
+
+function ChunkSoloView({ gy, chunkInfo }: { gy: Graveyard; chunkInfo: ChunkInfo }) {
+  const { period, angleStart, angleEnd, periodChunks } = chunkInfo;
+  const PL = gy.periodLength;
+  const N = periodChunks;
+
+  const rI = period * PL;
+  const rO = (period + 1) * PL;
+  let a1 = angleStart;
+  let a2 = angleEnd;
+  if (N === 1) { a1 = 0; a2 = 2 * Math.PI; }
+
+  // Cartesian stretch matrix in the tangential direction
+  const sf = gy.scalingFactor(period);
+  const theta = (a1 + a2) / 2;
+  const sn = Math.sin(theta);
+  const cs = Math.cos(theta);
+  const ma = sf * sn * sn + cs * cs;
+  const mb = (1 - sf) * sn * cs;
+  const md = sf * cs * cs + sn * sn;
+
+  // Transform helper
+  const tfx = (x: number, y: number) => ma * x + mb * y;
+  const tfy = (x: number, y: number) => mb * x + md * y;
+
+  // Sample boundary of the sector and compute rescaled bbox
+  const nSamp = 48;
+  let sxMin = Infinity, sxMax = -Infinity, syMin = Infinity, syMax = -Infinity;
+  for (let i = 0; i <= nSamp; i++) {
+    const a = a1 + (a2 - a1) * i / nSamp;
+    for (const r of [rI, rO]) {
+      const px = r * Math.cos(a), py = r * Math.sin(a);
+      const x = tfx(px, py), y = tfy(px, py);
+      if (x < sxMin) sxMin = x; if (x > sxMax) sxMax = x;
+      if (y < syMin) syMin = y; if (y > syMax) syMax = y;
+    }
+  }
+
+  // ViewBox sized to rescaled chunk only — original may overflow
+  const pad = PL * 0.1;
+  const scaledCx = (sxMin + sxMax) / 2;
+  const vbW = Math.max(SOLO_W, sxMax - sxMin + 2 * pad);
+  const vbH = (syMax - syMin) + pad; // pad only at bottom, top flush
+  const vb = `${scaledCx - vbW / 2} ${syMin} ${vbW} ${vbH}`;
+
+  const sw = Math.max(0.3, vbW * 0.002);
+  const color = RING_COLORS[period % RING_COLORS.length];
+  const sectorD = sectorPath(0, 0, rI, rO, a1, a2);
+
+  return (
+    <svg viewBox={vb} className="chunk-solo-svg"
+      style={{ aspectRatio: `${vbW} / ${vbH}` }}
+      overflow="visible"
+      preserveAspectRatio="xMidYMin slice">
+      {/* Original chunk — semi-transparent, can overflow */}
+      <path d={sectorD} fill="none"
+        stroke={color} strokeOpacity={0.2} strokeWidth={sw} />
+      {/* Rescaled chunk — main element */}
+      <g transform={`matrix(${ma}, ${mb}, ${mb}, ${md}, 0, 0)`}>
+        <path d={sectorD} fill="none"
+          stroke="#fff" strokeOpacity={0.8}
+          strokeWidth={sw / Math.max(sf, 0.01)} />
+      </g>
     </svg>
   );
 }
@@ -319,25 +355,14 @@ function BoundaryList({ label, items }: { label: string; items: BoundaryNeighbor
 // ================================================================
 export default function App() {
   const [periodLength, setPeriodLength] = useState(75);
-  const [lastPeriodGraves, setLastPeriodGraves] = useState(5e9);
-  const [maxGraves, setMaxGraves] = useState(1000);
-  const [selectedPeriod, setSelectedPeriod] = useState(0);
+  const [maxGraves, setMaxGraves] = useState(200);
+  const [selectedPeriod, setSelectedPeriod] = useState(50);
   const [selectedChunk, setSelectedChunk] = useState(0);
 
   const gy = useMemo(
-    () => new Graveyard(periodLength, lastPeriodGraves, maxGraves),
-    [periodLength, lastPeriodGraves, maxGraves],
+    () => new Graveyard(periodLength, maxGraves),
+    [periodLength, maxGraves],
   );
-
-  // Chart data
-  const chartData = useMemo(() => {
-    const data: { yearsAgo: number; bar: number; line: number; chunks: number }[] = [];
-    for (let i = 0; i < gy.numPeriods; i++) {
-      const s = gy.periodStats(i);
-      data.push({ yearsAgo: s.yearsAgo, bar: s.graves, line: s.fTimesP, chunks: s.chunks });
-    }
-    return data;
-  }, [gy]);
 
   const totalChunks = useMemo(
     () => { let s = 0; for (let i = 0; i < gy.numPeriods; i++) s += gy.chunksInPeriod(i); return s; },
@@ -355,16 +380,6 @@ export default function App() {
     [gy, safePeriod, safeChunk],
   );
 
-  const xTicks = useMemo(() => {
-    const n = chartData.length;
-    if (n <= 10) return chartData.map(d => d.yearsAgo);
-    const step = Math.max(1, Math.floor(n / 7));
-    const ticks: number[] = [];
-    for (let i = n - 1; i >= 0; i -= step) ticks.push(chartData[i].yearsAgo);
-    if (!ticks.includes(chartData[0].yearsAgo)) ticks.push(chartData[0].yearsAgo);
-    return ticks.sort((a, b) => b - a);
-  }, [chartData]);
-
   const selStats = gy.periodStats(safePeriod);
 
   const totalNeighbors =
@@ -377,11 +392,15 @@ export default function App() {
     <div className="app">
       <h1 className="title">Graveyard</h1>
       <p className="subtitle">
-        Exponential model of {fmtCount(Graveyard.TOTAL_GRAVES)} human graves
-        &nbsp;&middot;&nbsp; span: {gy.totalSpan.toLocaleString()} years ({gy.numPeriods} periods)
-        &nbsp;&middot;&nbsp; &alpha; = {gy.alpha.toExponential(4)}
+        {fmtCount(gy.totalGraves)} human graves
+        &nbsp;&middot;&nbsp; {fmtCalendarYear(gy.totalSpan)} &rarr; present ({gy.numPeriods} periods of {periodLength} yr)
         &nbsp;&middot;&nbsp; total chunks: {fmtCount(totalChunks)}
       </p>
+
+      <h2 className="chart-title">World population estimates</h2>
+      <div className="chart-wrap">
+        <PopulationChart />
+      </div>
 
       <div className="controls">
         <label className="ctrl">
@@ -390,38 +409,10 @@ export default function App() {
             value={periodLength} onChange={e => setPeriodLength(+e.target.value)} />
         </label>
         <label className="ctrl">
-          <span>Graves in last period: <b>{fmtCount(lastPeriodGraves)}</b></span>
-          <input type="range" min={1e9} max={10e9} step={0.5e9}
-            value={lastPeriodGraves} onChange={e => setLastPeriodGraves(+e.target.value)} />
-        </label>
-        <label className="ctrl">
           <span>Max graves per chunk: <b>{maxGraves.toLocaleString()}</b></span>
           <input type="range" min={100} max={100000} step={100}
             value={maxGraves} onChange={e => setMaxGraves(+e.target.value)} />
         </label>
-      </div>
-
-      <h2 className="chart-title">Graves per period</h2>
-      <div className="chart-wrap">
-        <ResponsiveContainer width="100%" height={400}>
-          <ComposedChart data={chartData} margin={{ top: 16, right: 24, bottom: 20, left: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e1e1e" />
-            <XAxis dataKey="yearsAgo" type="number" domain={['dataMin', 'dataMax']}
-              reversed ticks={xTicks} tickFormatter={fmtYearsAgo}
-              tick={{ fill: '#666', fontSize: 11 }} stroke="#333"
-              label={{ value: 'years ago', position: 'insideBottom', offset: -10, fill: '#555', fontSize: 12 }} />
-            <YAxis scale="log" domain={['auto', 'auto']} allowDataOverflow
-              tickFormatter={fmtCount} tick={{ fill: '#666', fontSize: 11 }} stroke="#333" width={60} />
-            <Tooltip
-              contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 6, fontSize: 12 }}
-              labelFormatter={(v: number) => fmtYearsAgo(v)}
-              formatter={(value: number, name: string) => [fmtCount(value), name === 'bar' ? '∫ per period' : 'f(t) × period']} />
-            <Legend formatter={(v: string) => v === 'bar' ? '∫ per period' : 'f(t) × period'}
-              wrapperStyle={{ fontSize: 12, color: '#888' }} />
-            <Bar dataKey="bar" fill="rgba(78, 205, 196, 0.5)" stroke="rgba(78, 205, 196, 0.3)" isAnimationActive={false} />
-            <Line dataKey="line" stroke="#ff8c42" strokeWidth={2} dot={false} isAnimationActive={false} />
-          </ComposedChart>
-        </ResponsiveContainer>
       </div>
 
       <h2 className="chart-title">Chunk inspector</h2>
@@ -438,10 +429,25 @@ export default function App() {
               onChange={e => { setSelectedPeriod(+e.target.value); setSelectedChunk(0); }} />
           </label>
 
+          <div className="tess-scaling">
+            Scaling factor: <b>{gy.scalingFactor(safePeriod).toFixed(4)}</b>
+            <span className="tess-scaling-detail">
+              &nbsp;= d / d₀ &nbsp;&middot;&nbsp;
+              d = {gy.densityOfPeriod(safePeriod).toExponential(4)},
+              d₀ = {gy.densityOfPeriod(0).toExponential(4)}
+            </span>
+            <br />
+            <span className="tess-scaling-detail">
+              center: {fmtCount(gy.gravesInPeriod(0))} graves / {gy.areaOfPeriod(0).toFixed(0)} area
+              &nbsp;&middot;&nbsp;
+              ring {safePeriod}: {fmtCount(gy.gravesInPeriod(safePeriod))} graves / {gy.areaOfPeriod(safePeriod).toFixed(0)} area
+            </span>
+          </div>
+
           <div className="tess-info-grid">
             <div className="tess-info-item">
               <span className="tess-label">Time window</span>
-              <span className="tess-value">{fmtYearsAgo(selStats.yearsAgo + periodLength / 2)} &rarr; {fmtYearsAgo(selStats.yearsAgo - periodLength / 2)}</span>
+              <span className="tess-value">{fmtCalendarYear(selStats.yearsAgo + periodLength / 2)} &rarr; {fmtCalendarYear(selStats.yearsAgo - periodLength / 2)}</span>
             </div>
             <div className="tess-info-item">
               <span className="tess-label">Graves</span>
@@ -489,6 +495,11 @@ export default function App() {
             <BoundaryList label="Outer boundary" items={chunkInfo.neighbors.outer} />
           </div>
         </div>
+      </div>
+
+      <h2 className="chart-title">Chunk ({safePeriod}, {safeChunk})</h2>
+      <div className="chunk-solo-wrap">
+        <ChunkSoloView gy={gy} chunkInfo={chunkInfo} />
       </div>
     </div>
   );
