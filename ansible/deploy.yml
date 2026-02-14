@@ -1,0 +1,96 @@
+# =============================================================================
+# GRAVEYARD PROJECT DEPLOYMENT PLAYBOOK
+# =============================================================================
+#
+# SAFETY GUARANTEES:
+#
+# 1. TARGET DIRECTORY: Only /srv/projects/graveyard is touched
+#    - All file operations use project_dir variable
+#    - The synchronize task has explicit dest: /srv/projects/graveyard/
+#
+# 2. NGINX-PROXY INTEGRATION:
+#    - Connects to existing nginx-proxy network (external: true)
+#    - Sets VIRTUAL_HOST=graveyard.janczechowski.com
+#    - Sets LETSENCRYPT_HOST=graveyard.janczechowski.com
+#    - Does NOT modify /srv/projects/nginx-proxy/ files
+#    - docker-gen will auto-discover and route traffic
+#
+# 3. NO DNS CHANGES: You must manually add DNS A record:
+#    graveyard.janczechowski.com -> your server IP
+#
+# 4. DOCKER COMMANDS: Only these docker operations are performed:
+#    - docker compose down (stop existing containers)
+#    - docker compose build (build images)
+#    - docker compose up -d (start containers)
+#    All scoped to /srv/projects/graveyard/docker-compose.yml
+#
+# =============================================================================
+
+- name: Deploy graveyard project
+  hosts: bluh
+  
+  vars:
+    # SAFETY: This is the ONLY directory we touch on the server
+    project_dir: /srv/projects/graveyard
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # TASK 1: Create project directory
+    # -------------------------------------------------------------------------
+    - name: Ensure project directory exists
+      ansible.builtin.file:
+        path: "{{ project_dir }}"
+        state: directory
+        mode: '0755'
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Sync project files from local to server
+    # -------------------------------------------------------------------------
+    - name: Sync project files to server
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ project_dir }}/"
+        delete: no
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=.venv"
+          - "--exclude=node_modules"
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--exclude=ansible"
+          - "--exclude=.DS_Store"
+          - "--exclude=dist"
+          - "--exclude=*.log"
+          - "--exclude=.cursor"
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Stop existing containers (if any)
+    # -------------------------------------------------------------------------
+    - name: Stop existing containers
+      ansible.builtin.shell: |
+        cd {{ project_dir }} && docker compose down --remove-orphans
+      ignore_errors: yes
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Build and start containers
+    # -------------------------------------------------------------------------
+    - name: Build and start containers
+      ansible.builtin.shell: |
+        cd {{ project_dir }} && docker compose --profile production up -d --build site
+      register: docker_result
+
+    - name: Show docker compose output
+      ansible.builtin.debug:
+        var: docker_result.stdout_lines
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Verify containers are running
+    # -------------------------------------------------------------------------
+    - name: Check container status
+      ansible.builtin.shell: |
+        cd {{ project_dir }} && docker compose ps
+      register: ps_result
+
+    - name: Show running containers
+      ansible.builtin.debug:
+        var: ps_result.stdout_lines

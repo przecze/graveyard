@@ -1,0 +1,60 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - ./frontend/package.json:/app/package.json
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    networks:
+      - localnet
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+    environment:
+      DEV_MODE: "true"
+      NGINX_ENVSUBST_FILTER: DEV_MODE
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+    networks:
+      - localnet
+    depends_on:
+      - frontend
+    ports:
+      - 127.0.0.1:3082:80
+    restart: unless-stopped
+
+  # Production: self-contained nginx with built frontend
+  site:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    networks:
+      - localnet
+      - nginx-proxy
+    #ports: ["127.0.0.1:80:80"]
+    environment:
+      VIRTUAL_HOST: graveyard.janczechowski.com
+      LETSENCRYPT_HOST: graveyard.janczechowski.com
+      DEV_MODE: "false"
+      NGINX_ENVSUBST_FILTER: DEV_MODE
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+    restart: always
+    profiles:
+      - production
+
+networks:
+  localnet:
+  nginx-proxy:
+    external: true
