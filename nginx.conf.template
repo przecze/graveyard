@@ -1,0 +1,90 @@
+# nginx.conf.template - single config for dev and prod
+# Uses DEV_MODE env var to conditionally allow inline scripts/styles
+
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+  sendfile      on;
+  keepalive_timeout 65;
+  server_names_hash_bucket_size 64;
+
+  map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+  }
+
+  # DEV_MODE controls CSP inline permissions
+  map "${DEV_MODE}" $dev_style_inline {
+    default "";
+    "true"  " 'unsafe-inline'";
+    "1"     " 'unsafe-inline'";
+  }
+
+  map "${DEV_MODE}" $dev_script_policy {
+    default "";
+    "true"  " 'unsafe-inline' 'unsafe-eval'";
+    "1"     " 'unsafe-inline' 'unsafe-eval'";
+  }
+
+  server {
+    listen 80;
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # --- Security headers ---
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-site" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'${dev_script_policy}; style-src 'self'${dev_style_inline}; font-src 'self' data:; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" always;
+
+    # --- Block common scanner paths ---
+    location ~* \.(php|asp|aspx|jsp|cgi|pl|sh|py|rb)$ { return 404; }
+
+    location ~* ^/(admin|wp-admin|wp-login|administrator|phpmyadmin|mysql|sql|backup|config|\.env|\.git) {
+      return 404;
+    }
+
+    # Dev fallback (Vite upstream) - only works when frontend service is running
+    set $vite_upstream frontend:3000;
+    resolver 127.0.0.11 ipv6=off valid=30s;
+
+    location @vite {
+      proxy_pass http://$vite_upstream;
+      proxy_http_version 1.1;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+    }
+
+    # Allow Vite dev dependencies before catch-all
+    location ^~ /node_modules/ {
+      try_files $uri $uri/ @vite;
+    }
+
+    # Root path - try index.html, fallback to Vite
+    location = / {
+      try_files /index.html @vite;
+    }
+
+    # SPA routing - try static files, then fallback to index.html or Vite
+    location / {
+      try_files $uri $uri/ /index.html @vite;
+    }
+  }
+}

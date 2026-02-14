@@ -1,0 +1,22 @@
+# Frontend - Node.js and build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/npm-debug.log*
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
