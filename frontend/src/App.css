@@ -88,8 +88,8 @@
 }
 
 .tess-svg {
-  width: 340px;
-  height: 340px;
+  width: 400px;
+  height: 400px;
 }
 
 .tess-panel {
@@ -102,6 +102,22 @@
 
 .tess-panel .ctrl input[type="range"] {
   width: 100%;
+}
+
+/* scaling factor */
+.tess-scaling {
+  font: 13px monospace;
+  color: #aaa;
+  padding: 6px 0;
+}
+
+.tess-scaling b {
+  color: #4ecdc4;
+}
+
+.tess-scaling-detail {
+  font-size: 11px;
+  color: #555;
 }
 
 /* info grid */
@@ -175,6 +191,22 @@
   font: 11px monospace;
   color: #777;
   padding: 2px 0 2px 20px;
+}
+
+/* solo chunk view */
+.chunk-solo-wrap {
+  background: #0e0e0e;
+  border: 1px solid #1e1e1e;
+  border-radius: 6px;
+  padding: 16px;
+  overflow: visible;
+  margin-bottom: 24px;
+}
+
+.chunk-solo-svg {
+  width: 100%;
+  height: auto;
+  overflow: visible;
 }
 
 /* recharts legend text */
