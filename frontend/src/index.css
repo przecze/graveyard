@@ -7,9 +7,6 @@
 body {
   background: #111;
   color: #aaa;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100vh;
   font-family: monospace;
+  min-height: 100vh;
 }
