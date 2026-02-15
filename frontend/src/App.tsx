@@ -77,12 +77,9 @@ function sectorPath(
 }
 
 // ----------------------------------------------------------------
-// Focused chunk view — fixed 200×200 year canvas, no rotation/rescaling
+// Focused chunk view — only selected chunk + direct neighbors
 // ----------------------------------------------------------------
 const RING_COLORS = ['#4ecdc4', '#ff8c42', '#c678dd', '#e06c75', '#61afef', '#98c379'];
-const CANVAS_YEARS = 400;
-const HALF = CANVAS_YEARS / 2;
-const DIAG = HALF * Math.SQRT2; // ~141 years — max distance from view center to corner
 
 function FocusedView({
   gy,
@@ -93,131 +90,57 @@ function FocusedView({
 }) {
   const { period: selP, chunkId: selC, neighbors } = chunkInfo;
   const P = gy.periodLength;
+  const yc = gy.ancientCircleRadius;
 
-  // Center of selected chunk in year-coordinate space (tessellation origin = 0,0)
-  const rMid = (selP + 0.5) * P;
-  const thetaMid = (chunkInfo.angleStart + chunkInfo.angleEnd) / 2;
-  const viewCx = rMid * Math.cos(thetaMid);
-  const viewCy = rMid * Math.sin(thetaMid);
-
-  // Fixed viewBox — always 200×200 years centered on selected chunk
-  const vb = `${viewCx - HALF} ${viewCy - HALF} ${CANVAS_YEARS} ${CANVAS_YEARS}`;
-
-  // Visible radial range
-  const minR = Math.max(0, rMid - DIAG);
-  const maxR = rMid + DIAG;
-  const minPeriod = Math.max(0, Math.floor(minR / P));
-  const maxPeriod = Math.min(gy.numPeriods - 1, Math.ceil(maxR / P));
-
-  // Highlight sets
+  // Build list of chunks to render: selected + all direct neighbors
   const allNeighborAddrs: ChunkAddr[] = [
     ...(neighbors.clockwise ? [neighbors.clockwise] : []),
     ...(neighbors.anticlockwise ? [neighbors.anticlockwise] : []),
     ...neighbors.inner.map(b => b.addr),
     ...neighbors.outer.map(b => b.addr),
   ];
-  const selectedKey = `${selP}:${selC}`;
-  const neighborSet = new Set(allNeighborAddrs.map(a => `${a.period}:${a.chunk}`));
+  const toDraw: { addr: ChunkAddr; isSel: boolean }[] = [
+    { addr: { period: selP, chunk: selC }, isSel: true },
+    ...allNeighborAddrs.map(a => ({ addr: a, isSel: false })),
+  ];
+
+  // Center viewBox on the selected chunk
+  const rMid = yc + (selP + 0.5) * P;
+  const thetaMid = (chunkInfo.angleStart + chunkInfo.angleEnd) / 2;
+  const viewCx = rMid * Math.cos(thetaMid);
+  const viewCy = rMid * Math.sin(thetaMid);
+  const span = P * 4;
+  const half = span / 2;
+  const vb = `${viewCx - half} ${viewCy - half} ${span} ${span}`;
+  const sw = span * 0.004;
 
   return (
     <svg viewBox={vb} className="tess-svg" preserveAspectRatio="xMidYMid meet">
-      {Array.from({ length: maxPeriod - minPeriod + 1 }, (_, i) => {
-        const pi = minPeriod + i;
-        const rI = pi * P;
-        const rO = (pi + 1) * P;
+      {toDraw.map(({ addr, isSel }, i) => {
+        const pi = addr.period;
+        const ci = addr.chunk;
+        const rI = yc + pi * P;
+        const rO = yc + (pi + 1) * P;
         const Npi = gy.chunksInPeriod(pi);
+        const piOff = gy.chunkOffset(pi);
         const astep = (2 * Math.PI) / Npi;
-        const piOff = gy.chunkOffset(pi); // 0.5 for odd periods
+        let a1 = (ci + piOff) * astep;
+        // Wrap angle near thetaMid to avoid drawing on the far side
+        while (a1 - thetaMid > Math.PI) a1 -= 2 * Math.PI;
+        while (thetaMid - a1 > Math.PI) a1 += 2 * Math.PI;
+        const a2 = a1 + astep;
         const color = RING_COLORS[pi % RING_COLORS.length];
-        const rCenter = (rI + rO) / 2;
 
-        const els: JSX.Element[] = [];
-
-        // Visible angular margin at this ring's radius
-        const angMargin = rCenter > 1 ? DIAG / rCenter + astep * 2 : Math.PI;
-        const clampedMargin = Math.min(angMargin, Math.PI);
-
-        // Ring background band
-        els.push(
-          <path key="bg"
-            d={sectorPath(0, 0, rI, rO,
-              thetaMid - clampedMargin, thetaMid + clampedMargin)}
-            fill={color} fillOpacity={0.04}
-            stroke={color} strokeOpacity={0.12} strokeWidth={0.3}
+        return (
+          <path key={i}
+            d={sectorPath(0, 0, rI, rO, a1, a2)}
+            fill={isSel ? '#fff' : color}
+            fillOpacity={isSel ? 0.45 : 0.3}
+            stroke={isSel ? '#fff' : '#fff'}
+            strokeOpacity={isSel ? 1 : 0.5}
+            strokeWidth={isSel ? sw * 2 : sw}
           />
         );
-
-        // Arc length per chunk (years) at ring center
-        const arcLen = (2 * Math.PI * rCenter) / Npi;
-
-        // Only draw individual chunk outlines if they're large enough to see
-        const drawAll = arcLen > 0.4;
-
-        if (drawAll) {
-          const minIdx = Math.floor((thetaMid - clampedMargin) / astep - piOff) - 1;
-          const maxIdx = Math.ceil((thetaMid + clampedMargin) / astep - piOff) + 1;
-          for (let ci = minIdx; ci <= maxIdx; ci++) {
-            const wci = ((ci % Npi) + Npi) % Npi; // wrapped chunk id
-            const a1 = (ci + piOff) * astep;
-            const a2 = (ci + 1 + piOff) * astep;
-            const key = `${pi}:${wci}`;
-            const isSel = key === selectedKey;
-            const isNb = neighborSet.has(key);
-
-            els.push(
-              <path key={`c${ci}`}
-                d={sectorPath(0, 0, rI, rO, a1, a2)}
-                fill={isSel ? '#fff' : color}
-                fillOpacity={isSel ? 0.5 : isNb ? 0.4 : 0.08}
-                stroke={isSel ? '#fff' : isNb ? '#fff' : color}
-                strokeOpacity={isSel ? 1 : isNb ? 0.7 : 0.2}
-                strokeWidth={isSel ? 1.5 : isNb ? 1 : 0.2}
-              />
-            );
-          }
-        } else {
-          // Chunks too small to draw individually — only highlight selected + neighbors
-          const toHighlight: { c: number; isSel: boolean }[] = [];
-          if (selP === pi) toHighlight.push({ c: selC, isSel: true });
-          for (const addr of allNeighborAddrs) {
-            if (addr.period === pi) toHighlight.push({ c: addr.chunk, isSel: false });
-          }
-          for (let hi = 0; hi < toHighlight.length; hi++) {
-            const { c, isSel } = toHighlight[hi];
-            let a1 = (c + piOff) * astep;
-            // Wrap near thetaMid
-            while (a1 - thetaMid > Math.PI) a1 -= 2 * Math.PI;
-            while (thetaMid - a1 > Math.PI) a1 += 2 * Math.PI;
-            const a2 = a1 + astep;
-            els.push(
-              <path key={`h${hi}`}
-                d={sectorPath(0, 0, rI, rO, a1, a2)}
-                fill={isSel ? '#fff' : color}
-                fillOpacity={isSel ? 0.5 : 0.4}
-                stroke={isSel ? '#fff' : '#fff'}
-                strokeOpacity={isSel ? 1 : 0.7}
-                strokeWidth={isSel ? 1.5 : 1}
-              />
-            );
-          }
-        }
-
-        // Period label at the right edge of the visible band
-        const labelA = thetaMid + clampedMargin * 0.85;
-        const labelR = rCenter;
-        const fontSize = Math.min(4, P * 0.3);
-        els.push(
-          <text key="label"
-            x={labelR * Math.cos(labelA)}
-            y={labelR * Math.sin(labelA)}
-            textAnchor="start" dominantBaseline="central"
-            fill={color} fontSize={fontSize} fontFamily="monospace" opacity={0.7}
-          >
-            P{pi}
-          </text>
-        );
-
-        return <g key={pi}>{els}</g>;
       })}
     </svg>
   );
@@ -355,13 +278,14 @@ function BoundaryList({ label, items }: { label: string; items: BoundaryNeighbor
 // ================================================================
 export default function App() {
   const [periodLength, setPeriodLength] = useState(75);
-  const [maxGraves, setMaxGraves] = useState(200);
+  const [maxGraves, setMaxGraves] = useState(100000);
+  const [ancientCircleRadius, setAncientCircleRadius] = useState(1800);
   const [selectedPeriod, setSelectedPeriod] = useState(50);
   const [selectedChunk, setSelectedChunk] = useState(0);
 
   const gy = useMemo(
-    () => new Graveyard(periodLength, maxGraves),
-    [periodLength, maxGraves],
+    () => new Graveyard(periodLength, maxGraves, ancientCircleRadius),
+    [periodLength, maxGraves, ancientCircleRadius],
   );
 
   const totalChunks = useMemo(
@@ -397,9 +321,8 @@ export default function App() {
         &nbsp;&middot;&nbsp; total chunks: {fmtCount(totalChunks)}
       </p>
 
-      <h2 className="chart-title">World population estimates</h2>
       <div className="chart-wrap">
-        <PopulationChart />
+        <PopulationChart yc={ancientCircleRadius} onYcChange={setAncientCircleRadius} />
       </div>
 
       <div className="controls">
@@ -410,8 +333,9 @@ export default function App() {
         </label>
         <label className="ctrl">
           <span>Max graves per chunk: <b>{maxGraves.toLocaleString()}</b></span>
-          <input type="range" min={100} max={100000} step={100}
-            value={maxGraves} onChange={e => setMaxGraves(+e.target.value)} />
+          <input type="range" min={0} max={1000} step={1}
+            value={Math.round(Math.log(maxGraves / 1000) / Math.log(5000) * 1000)}
+            onChange={e => setMaxGraves(Math.round(1000 * Math.pow(5000, +e.target.value / 1000)))} />
         </label>
       </div>
 

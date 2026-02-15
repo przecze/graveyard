@@ -1,63 +1,73 @@
-import rawPopData from './data.json';
+import rawPrbData from './data.json';
 import deathsOwid from './deathsOwid';
 
 // ----------------------------------------------------------------
-// Death-rate estimation from historical population data
+// Death-rate estimation from PRB grave-count data + OWID
 // ----------------------------------------------------------------
 
-const DATA_START = -10000;   // earliest data point (10 000 BC)
+const DATA_START = -8000;    // 8000 BCE = start of ring model
 const PRESENT_YEAR = 2026;
 
-/** Parse a population string like "2M", "5–10M", "<700M" → number | null */
-function parsePop(s: string): number | null {
-  s = s.trim().replace(/,/g, '');
-  const range = s.match(/^(\d+(?:\.\d+)?)\s*[–\-]\s*(\d+(?:\.\d+)?)M?$/);
-  if (range) return ((+range[1] + +range[2]) / 2) * 1e6;
-  const lt = s.match(/^<\s*(\d+(?:\.\d+)?)M$/);
-  if (lt) return +lt[1] * 1e6;
-  const m = s.match(/^(\d+(?:\.\d+)?)M$/);
-  if (m) return +m[1] * 1e6;
-  const n = parseFloat(s);
-  return isNaN(n) ? null : n * 1e6;
+/**
+ * Exponential fit per PRB interval, chained left→right.
+ * d(t) = dLeft · e^(k·(t − t_start))  within each interval.
+ * k is solved so that ∫₀ᵀ d(t)dt = G (graves in interval).
+ */
+interface ExpIv {
+  startYr: number; endYr: number;
+  dLeft: number; dRight: number; k: number;
 }
 
-/** Crude death rate: 3 % before 1700, linearly falling to 2 % by 1940. */
-function cdr(year: number): number {
-  if (year <= 1700) return 0.03;
-  if (year >= 1940) return 0.02;
-  return 0.03 + ((year - 1700) / (1940 - 1700)) * (0.02 - 0.03);
+/** Solve (e^u − 1)/u = R for u. Newton's method. */
+function solveExpU(R: number): number {
+  if (Math.abs(R - 1) < 1e-10) return 0;
+  let u = R > 10 ? Math.log(R) + Math.log(Math.log(R) + 1) : 2 * (R - 1);
+  if (R < 0.1) u = -2;
+  for (let iter = 0; iter < 100; iter++) {
+    const eu = Math.exp(u);
+    if (Math.abs(u) < 1e-14) { u = 2 * (R - 1); break; }
+    const f = (eu - 1) / u - R;
+    const fp = (u * eu - eu + 1) / (u * u);
+    if (Math.abs(fp) < 1e-30) break;
+    const du = f / fp;
+    u -= du;
+    if (Math.abs(du) < 1e-12 * Math.max(1, Math.abs(u))) break;
+  }
+  return u;
 }
 
-/** Average population at each data-point year (sorted). */
-function buildPopPoints(): { year: number; pop: number }[] {
-  const data = rawPopData as Record<string, Record<string, string>>;
-  const pts: { year: number; pop: number }[] = [];
-  for (const [yearStr, estimates] of Object.entries(data)) {
-    const year = Number(yearStr);
-    const vals: number[] = [];
-    for (const v of Object.values(estimates)) {
-      const n = parsePop(v);
-      if (n && n > 0) vals.push(n);
-    }
-    if (vals.length) {
-      pts.push({ year, pop: vals.reduce((a, b) => a + b) / vals.length });
+function buildExpIntervals(cdr0: number): ExpIv[] {
+  const entries = Object.entries(rawPrbData as Record<string, { graves: number; pop: number }>)
+    .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
+    .sort((a, b) => a.year - b.year);
+
+  const result: ExpIv[] = [];
+  let dLeft = cdr0 * entries[0].pop;
+
+  for (let i = 1; i < entries.length; i++) {
+    const prev = entries[i - 1];
+    const cur = entries[i];
+    const T = cur.year - prev.year;
+    const G = cur.graves;
+    const R = G / (dLeft * T);
+    const u = solveExpU(R);
+    const k = u / T;
+    const dRight = dLeft * Math.exp(u);
+    result.push({ startYr: prev.year, endYr: cur.year, dLeft, dRight, k });
+    dLeft = dRight;
+  }
+  return result;
+}
+
+/** Interpolate death rate at a given year from exponential intervals. */
+function interpExpRate(ivs: ExpIv[], year: number): number {
+  for (const iv of ivs) {
+    if (year >= iv.startYr && year < iv.endYr) {
+      return iv.dLeft * Math.exp(iv.k * (year - iv.startYr));
     }
   }
-  pts.sort((a, b) => a.year - b.year);
-  return pts;
-}
-
-/** Linearly interpolate population at an arbitrary year. */
-function interpPop(pts: { year: number; pop: number }[], year: number): number {
-  if (year <= pts[0].year) return pts[0].pop;
-  if (year >= pts[pts.length - 1].year) return pts[pts.length - 1].pop;
-  let lo = 0, hi = pts.length - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (pts[mid].year <= year) lo = mid; else hi = mid;
-  }
-  const t = (year - pts[lo].year) / (pts[hi].year - pts[lo].year);
-  return pts[lo].pop + t * (pts[hi].pop - pts[lo].pop);
+  const last = ivs[ivs.length - 1];
+  return last.dRight;
 }
 
 /** OWID actual deaths keyed by year for O(1) lookup. */
@@ -69,12 +79,12 @@ const lastOwidDeaths = deathsOwid[deathsOwid.length - 1][1];
  * Build an array of annual deaths from `startYear` (inclusive)
  * to `endYear` (exclusive).  Index i → year startYear + i.
  *
- *  • Pre-1950: interpolated population × CDR
+ *  • Pre-1950: PRB interval constant rate
  *  • 1950–2023: OWID actuals
  *  • 2024+: extrapolate last OWID value
  */
-function buildAnnualDeaths(startYear: number, endYear: number): Float64Array {
-  const popPts = buildPopPoints();
+function buildAnnualDeaths(startYear: number, endYear: number, cdr0 = 0.035): Float64Array {
+  const ivs = buildExpIntervals(cdr0);
   const len = endYear - startYear;
   const deaths = new Float64Array(len);
   for (let i = 0; i < len; i++) {
@@ -85,7 +95,7 @@ function buildAnnualDeaths(startYear: number, endYear: number): Float64Array {
     } else if (y > lastOwidYear) {
       deaths[i] = lastOwidDeaths;
     } else {
-      deaths[i] = interpPop(popPts, y) * cdr(y);
+      deaths[i] = interpExpRate(ivs, y);
     }
   }
   return deaths;
@@ -142,12 +152,26 @@ export interface PeriodStats {
 }
 
 // ----------------------------------------------------------------
-// Graveyard class — data-driven (no curve fitting)
+// Ancient graves (first entry in data.json = all graves before 8000 BCE)
+// ----------------------------------------------------------------
+const prbSorted = Object.entries(rawPrbData as Record<string, { graves: number; pop: number }>)
+  .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
+  .sort((a, b) => a.year - b.year);
+const ANCIENT_GRAVES = prbSorted[0].graves;   // ~9 billion
+
+// ----------------------------------------------------------------
+// Graveyard class — data-driven, with ancient circle
 // ----------------------------------------------------------------
 
 export class Graveyard {
   readonly periodLength: number;
   readonly maxGraves: number;
+  /** Ancient circle radius in years. */
+  readonly ancientCircleRadius: number;
+  /** Ancient graves count (A). */
+  readonly ancientGraves: number;
+  /** Ancient circle density: A / yc² (π cancels). */
+  readonly ancientDensity: number;
   /** Calendar year the graveyard begins at. */
   readonly startYear: number;
   readonly totalSpan: number;
@@ -158,9 +182,12 @@ export class Graveyard {
   private readonly _gravesPerPeriod: Float64Array;
   private readonly _deathsPerYearMid: Float64Array;
 
-  constructor(periodLength: number, maxGraves: number) {
+  constructor(periodLength: number, maxGraves: number, ancientCircleRadius: number = 1800) {
     this.periodLength = periodLength;
     this.maxGraves = maxGraves;
+    this.ancientCircleRadius = ancientCircleRadius;
+    this.ancientGraves = ANCIENT_GRAVES;
+    this.ancientDensity = ANCIENT_GRAVES / (ancientCircleRadius * ancientCircleRadius);
 
     // Span rounded up so the last period includes the present
     this.totalSpan = Math.ceil((PRESENT_YEAR - DATA_START) / periodLength) * periodLength;
@@ -192,19 +219,20 @@ export class Graveyard {
     return this._gravesPerPeriod[period] ?? 0;
   }
 
-  /** Number of chunks in a period. Period 0 (center) is always 1 chunk. */
+  /** Number of chunks in a period (all periods are rings around the ancient circle). */
   chunksInPeriod(period: number): number {
-    if (period === 0) return 1;
     return Math.max(1, Math.ceil(this.gravesInPeriod(period) / this.maxGraves));
   }
 
   /**
-   * Geographical area of a period's ring.
-   * Period 0 (center): π·P². Period i: π·P²·(2i+1).
+   * Geographical area of a period's ring, accounting for the ancient circle.
+   * Period i: inner radius = yc + i·P, outer radius = yc + (i+1)·P
+   * Area = π·((yc+(i+1)P)² - (yc+iP)²) = π·P²·(2·(yc/P + i) + 1)
    */
   areaOfPeriod(period: number): number {
     const P = this.periodLength;
-    return Math.PI * P * P * (2 * period + 1);
+    const ycP = this.ancientCircleRadius / P;  // yc in units of P
+    return Math.PI * P * P * (2 * (ycP + period) + 1);
   }
 
   /** Grave density = graves / geographical area. */
@@ -213,13 +241,16 @@ export class Graveyard {
   }
 
   /**
-   * Scaling factor for a period: period density / central density.
-   * Can be < 1 for periods less dense than the center.
+   * Scaling factor for a period: period density / ancient circle density.
+   * π cancels: graves_i·yc² / (A·P²·(2·(yc/P+i)+1))
    */
   scalingFactor(period: number): number {
-    const centralDensity = this.densityOfPeriod(0);
-    if (centralDensity === 0) return 0;
-    return this.densityOfPeriod(period) / centralDensity;
+    const P = this.periodLength;
+    const yc = this.ancientCircleRadius;
+    const ringFactor = 2 * (yc / P + period) + 1;
+    const denom = this.ancientGraves * P * P * ringFactor;
+    if (denom === 0) return 0;
+    return (this.gravesInPeriod(period) * yc * yc) / denom;
   }
 
   periodStats(period: number): PeriodStats {
