@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import {
   ComposedChart, Line, XAxis, YAxis,
   Tooltip, ResponsiveContainer, CartesianGrid, Legend,
@@ -30,87 +30,106 @@ const prbEntries: PrbEntry[] = Object.entries(
 export const ANCIENT_GRAVES = prbEntries[0].graves;
 
 // ----------------------------------------------------------------
-// Exponential fit per interval, chained left→right.
+// Right-anchored fit: exponential population × linear CDR.
 //
-// Within each interval:  d(t) = dLeft · e^(k · (t − t_start))
-// Integral constraint:   dLeft · (e^(kT) − 1) / k = G
-//   → solve for k (Newton on (e^u−1)/u = R, where u = kT, R = G/(dLeft·T))
-//   → dRight = dLeft · e^(kT)
-//   → chain: dLeft of next = dRight of current
+// For each interval [y0, y1], T = y1 − y0:
+//   pop(t) = P0 · e^(g·t),  g = ln(P1/P0) / T,  t ∈ [0,T]
+//   CDR(t) = c0 + (c1−c0)·t/T                    (linear)
+//   d(t)   = CDR(t) · pop(t)                      (deaths/yr)
+//
+// Integral constraint:  ∫₀ᵀ d(t) dt = G
+//   P0·[c0·A + c1·B] = G
+//   where A = I1 − I2/T,  B = I2/T
+//     I1 = ∫₀ᵀ e^(gt) dt
+//     I2 = ∫₀ᵀ t·e^(gt) dt
+//
+// Given c1 (CDR at right edge), solve:
+//   c0 = (G/P0 − c1·B) / A
+//
+// Anchor: at 1950 the OWID death rate gives c1 of the last interval.
+// Chain right→left: c0 of interval i becomes c1 of interval i−1.
 // ----------------------------------------------------------------
 
-/** Solve (e^u − 1)/u = R for u using Newton's method. */
-function solveExpU(R: number): number {
-  if (Math.abs(R - 1) < 1e-10) return 0;
-  // Initial guess
-  let u = R > 10 ? Math.log(R) + Math.log(Math.log(R) + 1) : 2 * (R - 1);
-  if (R < 0.1) u = -2; // shrinking case
-  for (let iter = 0; iter < 100; iter++) {
-    const eu = Math.exp(u);
-    // Avoid division by very small u
-    if (Math.abs(u) < 1e-14) { u = 2 * (R - 1); break; }
-    const f = (eu - 1) / u - R;
-    const fp = (u * eu - eu + 1) / (u * u);
-    if (Math.abs(fp) < 1e-30) break;
-    const du = f / fp;
-    u -= du;
-    if (Math.abs(du) < 1e-12 * Math.max(1, Math.abs(u))) break;
-  }
-  return u;
-}
-
-interface ExpInterval {
+interface FitInterval {
   startYear: number; endYear: number;
   startPop: number;  endPop: number;
   graves: number;
-  dLeft: number;  dRight: number;
-  k: number;
+  cdrLeft: number;   cdrRight: number;
+  g: number; // population growth rate
 }
 
-function buildExpIntervals(cdr0: number): ExpInterval[] {
-  const result: ExpInterval[] = [];
-  let dLeft = cdr0 * prbEntries[0].pop;
+function computeIntegrals(g: number, T: number): { I1: number; I2: number } {
+  if (Math.abs(g * T) < 1e-10) {
+    return { I1: T, I2: T * T / 2 };
+  }
+  const egT = Math.exp(g * T);
+  const I1 = (egT - 1) / g;
+  const I2 = T * egT / g - (egT - 1) / (g * g);
+  return { I1, I2 };
+}
 
-  for (let i = 1; i < prbEntries.length; i++) {
-    const prev = prbEntries[i - 1];
-    const cur = prbEntries[i];
-    const T = cur.year - prev.year;
-    const G = cur.graves;
-    const R = G / (dLeft * T);
-    const u = solveExpU(R);
-    const k = u / T;
-    const dRight = dLeft * Math.exp(u);
+function buildFitIntervals(): FitInterval[] {
+  // Anchor at 1950: OWID death rate
+  const d1950 = deathsOwid[0][1];
+  const p1950 = prbEntries[prbEntries.length - 1].pop;
+  let cdrRight = d1950 / p1950;
+
+  const result: FitInterval[] = [];
+
+  // Work backwards through PRB intervals
+  for (let i = prbEntries.length - 1; i >= 1; i--) {
+    const left = prbEntries[i - 1];
+    const right = prbEntries[i];
+    const T = right.year - left.year;
+    const P0 = left.pop;
+    const P1 = right.pop;
+    const G = right.graves;
+    const g = Math.log(P1 / P0) / T;
+
+    const { I1, I2 } = computeIntegrals(g, T);
+    const A = I1 - I2 / T;
+    const B = I2 / T;
+    const c1 = cdrRight;
+    const c0 = (G / P0 - c1 * B) / A;
 
     result.push({
-      startYear: prev.year, endYear: cur.year,
-      startPop: prev.pop, endPop: cur.pop,
-      graves: G, dLeft, dRight, k,
+      startYear: left.year, endYear: right.year,
+      startPop: P0, endPop: P1,
+      graves: G,
+      cdrLeft: c0, cdrRight: c1,
+      g,
     });
 
-    dLeft = dRight;
+    cdrRight = c0; // chain: left CDR becomes right CDR of next interval
   }
-  return result;
+
+  return result.reverse(); // chronological order
 }
 
+const fitIntervals = buildFitIntervals();
+
 // ----------------------------------------------------------------
-// Deaths-per-year series from exponential intervals + OWID
+// Deaths-per-year series from fitted intervals + OWID
 // ----------------------------------------------------------------
 
 interface DeathsPt { year: number; deathsPerYear: number }
 
-function buildDeathsPerYear(intervals: ExpInterval[]): DeathsPt[] {
+function buildDeathsPerYear(): DeathsPt[] {
   const pts: DeathsPt[] = [];
 
-  for (const iv of intervals) {
+  for (const iv of fitIntervals) {
     const T = iv.endYear - iv.startYear;
     const step = T > 500 ? 50 : T > 100 ? 10 : 1;
     for (let y = iv.startYear; y < iv.endYear; y += step) {
-      pts.push({ year: y, deathsPerYear: iv.dLeft * Math.exp(iv.k * (y - iv.startYear)) });
+      const t = y - iv.startYear;
+      const cdr = iv.cdrLeft + (iv.cdrRight - iv.cdrLeft) * t / T;
+      const pop = iv.startPop * Math.exp(iv.g * t);
+      pts.push({ year: y, deathsPerYear: cdr * pop });
     }
   }
   // Last PRB point
-  const last = intervals[intervals.length - 1];
-  pts.push({ year: last.endYear, deathsPerYear: last.dRight });
+  const last = fitIntervals[fitIntervals.length - 1];
+  pts.push({ year: last.endYear, deathsPerYear: last.cdrRight * last.endPop });
 
   // OWID from 1950 onward
   for (const [year, d] of deathsOwid) {
@@ -120,8 +139,7 @@ function buildDeathsPerYear(intervals: ExpInterval[]): DeathsPt[] {
 }
 
 // ----------------------------------------------------------------
-// Available graves from ancient circle density (commented-out per request,
-// but kept for later use)
+// Available graves from ancient circle density
 // ----------------------------------------------------------------
 
 interface AncientPt { year: number; availAncient: number }
@@ -163,23 +181,11 @@ interface Props {
 }
 
 export default function PopulationChart({ yc, onYcChange }: Props) {
-  const [cdr0, setCdr0] = useState(0.035); // 3.5%
-
-  const expIntervals = useMemo(() => buildExpIntervals(cdr0), [cdr0]);
-  const deathsData = useMemo(() => buildDeathsPerYear(expIntervals), [expIntervals]);
+  const deathsData = useMemo(buildDeathsPerYear, []);
   const ancientData = useMemo(() => buildAncientDensitySeries(yc), [yc]);
 
   return (
     <>
-      {/* Initial CDR slider */}
-      <label className="ctrl" style={{ marginBottom: 4 }}>
-        <span>Initial CDR at 8000 BCE: <b>{(cdr0 * 100).toFixed(1)}%</b>
-          &nbsp;&rarr; d₀ = {fmtPop(cdr0 * prbEntries[0].pop)}/yr</span>
-        <input type="range" min={0.001} max={0.10} step={0.001}
-          value={cdr0} onChange={e => setCdr0(+e.target.value)}
-          style={{ width: '100%' }} />
-      </label>
-
       {/* Ancient circle slider */}
       <label className="ctrl" style={{ marginBottom: 8 }}>
         <span>Ancient circle radius: <b>{yc} yr</b></span>
@@ -226,42 +232,55 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
       </ResponsiveContainer>
 
       {/* Interval table */}
-      <details style={{ marginTop: 12 }}>
+      <details style={{ marginTop: 12 }} open>
         <summary style={{ color: '#999', fontSize: 13, cursor: 'pointer' }}>
-          Exponential fit per interval (chained)
+          Exp-pop &times; linear-CDR fit (anchored at 1950 OWID)
         </summary>
         <table style={{ fontSize: 11, color: '#ccc', borderCollapse: 'collapse', marginTop: 8, width: '100%' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid #444' }}>
               <th style={{ textAlign: 'left', padding: '4px 6px' }}>Interval</th>
-              <th style={{ textAlign: 'right', padding: '4px 6px' }}>d(start)</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>Pop start</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>Pop end</th>
               <th style={{ textAlign: 'right', padding: '4px 6px' }}>CDR start</th>
-              <th style={{ textAlign: 'right', padding: '4px 6px' }}>d(end)</th>
               <th style={{ textAlign: 'right', padding: '4px 6px' }}>CDR end</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>d(start)</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>d(end)</th>
               <th style={{ textAlign: 'right', padding: '4px 6px' }}>Source graves</th>
               <th style={{ textAlign: 'right', padding: '4px 6px' }}>Recon. graves</th>
               <th style={{ textAlign: 'right', padding: '4px 6px' }}>Diff</th>
             </tr>
           </thead>
           <tbody>
-            {expIntervals.map((iv, i) => {
+            {fitIntervals.map((iv, i) => {
+              // Reconstructed integral: P0 * [c0*A + c1*B]
               const T = iv.endYear - iv.startYear;
-              // Reconstructed integral: dLeft * (e^(kT)-1)/k, or dLeft*T when k≈0
-              const recon = Math.abs(iv.k) < 1e-14
-                ? iv.dLeft * T
-                : iv.dLeft * (Math.exp(iv.k * T) - 1) / iv.k;
+              const { I1, I2 } = computeIntegrals(iv.g, T);
+              const A = I1 - I2 / T;
+              const B = I2 / T;
+              const recon = iv.startPop * (iv.cdrLeft * A + iv.cdrRight * B);
               const diff = recon - iv.graves;
-              const cdrStart = iv.dLeft / iv.startPop;
-              const cdrEnd = iv.dRight / iv.endPop;
+              const dStart = iv.cdrLeft * iv.startPop;
+              const dEnd = iv.cdrRight * iv.endPop;
               return (
                 <tr key={i} style={{ borderBottom: '1px solid #333' }}>
                   <td style={{ padding: '3px 6px' }}>
                     {fmtYear(iv.startYear)} &rarr; {fmtYear(iv.endYear)}
                   </td>
-                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(iv.dLeft)}</td>
-                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{(cdrStart * 100).toFixed(2)}%</td>
-                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(iv.dRight)}</td>
-                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{(cdrEnd * 100).toFixed(2)}%</td>
+                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(iv.startPop)}</td>
+                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(iv.endPop)}</td>
+                  <td style={{ textAlign: 'right', padding: '3px 6px',
+                    color: iv.cdrLeft < 0 ? '#e06c75' : undefined }}>
+                    {(iv.cdrLeft * 100).toFixed(2)}%
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>
+                    {(iv.cdrRight * 100).toFixed(2)}%
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '3px 6px',
+                    color: dStart < 0 ? '#e06c75' : undefined }}>
+                    {fmtPop(dStart)}
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(dEnd)}</td>
                   <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(iv.graves)}</td>
                   <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(recon)}</td>
                   <td style={{ textAlign: 'right', padding: '3px 6px',
@@ -272,8 +291,9 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
               );
             })}
             <tr style={{ borderBottom: '1px solid #333', color: '#888' }}>
-              <td style={{ padding: '3px 6px' }}>1950 &rarr; (OWID)</td>
-              <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(deathsOwid[0][1])}</td>
+              <td style={{ padding: '3px 6px' }}>1950 &rarr; (OWID anchor)</td>
+              <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(2499000000)}</td>
+              <td style={{ textAlign: 'right', padding: '3px 6px' }}>&mdash;</td>
               <td style={{ textAlign: 'right', padding: '3px 6px' }}>
                 {(deathsOwid[0][1] / 2499000000 * 100).toFixed(2)}%
               </td>
