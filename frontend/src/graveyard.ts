@@ -9,65 +9,69 @@ const DATA_START = -8000;    // 8000 BCE = start of ring model
 const PRESENT_YEAR = 2026;
 
 /**
- * Exponential fit per PRB interval, chained left→right.
- * d(t) = dLeft · e^(k·(t − t_start))  within each interval.
- * k is solved so that ∫₀ᵀ d(t)dt = G (graves in interval).
+ * Right-anchored fit: exponential population × linear CDR per interval.
+ *   pop(t) = P0·e^(g·t),  g = ln(P1/P0)/T
+ *   CDR(t) = c0 + (c1−c0)·t/T
+ *   d(t)   = CDR(t)·pop(t)
+ * Integral: P0·[c0·A + c1·B] = G where A,B from ∫e^(gt) and ∫t·e^(gt).
+ * Anchor: 1950 OWID death rate → chain right-to-left.
  */
-interface ExpIv {
+interface FitIv {
   startYr: number; endYr: number;
-  dLeft: number; dRight: number; k: number;
+  startPop: number; endPop: number;
+  cdrLeft: number; cdrRight: number;
+  g: number;
 }
 
-/** Solve (e^u − 1)/u = R for u. Newton's method. */
-function solveExpU(R: number): number {
-  if (Math.abs(R - 1) < 1e-10) return 0;
-  let u = R > 10 ? Math.log(R) + Math.log(Math.log(R) + 1) : 2 * (R - 1);
-  if (R < 0.1) u = -2;
-  for (let iter = 0; iter < 100; iter++) {
-    const eu = Math.exp(u);
-    if (Math.abs(u) < 1e-14) { u = 2 * (R - 1); break; }
-    const f = (eu - 1) / u - R;
-    const fp = (u * eu - eu + 1) / (u * u);
-    if (Math.abs(fp) < 1e-30) break;
-    const du = f / fp;
-    u -= du;
-    if (Math.abs(du) < 1e-12 * Math.max(1, Math.abs(u))) break;
-  }
-  return u;
+function computeIvIntegrals(g: number, T: number): { I1: number; I2: number } {
+  if (Math.abs(g * T) < 1e-10) return { I1: T, I2: T * T / 2 };
+  const egT = Math.exp(g * T);
+  return { I1: (egT - 1) / g, I2: T * egT / g - (egT - 1) / (g * g) };
 }
 
-function buildExpIntervals(cdr0: number): ExpIv[] {
+function buildFitIntervals(): FitIv[] {
   const entries = Object.entries(rawPrbData as Record<string, { graves: number; pop: number }>)
     .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
     .sort((a, b) => a.year - b.year);
 
-  const result: ExpIv[] = [];
-  let dLeft = cdr0 * entries[0].pop;
+  const d1950 = deathsOwid[0][1];
+  const p1950 = entries[entries.length - 1].pop;
+  let cdrRight = d1950 / p1950;
 
-  for (let i = 1; i < entries.length; i++) {
-    const prev = entries[i - 1];
-    const cur = entries[i];
-    const T = cur.year - prev.year;
-    const G = cur.graves;
-    const R = G / (dLeft * T);
-    const u = solveExpU(R);
-    const k = u / T;
-    const dRight = dLeft * Math.exp(u);
-    result.push({ startYr: prev.year, endYr: cur.year, dLeft, dRight, k });
-    dLeft = dRight;
+  const result: FitIv[] = [];
+  for (let i = entries.length - 1; i >= 1; i--) {
+    const left = entries[i - 1];
+    const right = entries[i];
+    const T = right.year - left.year;
+    const P0 = left.pop;
+    const P1 = right.pop;
+    const G = right.graves;
+    const g = Math.log(P1 / P0) / T;
+    const { I1, I2 } = computeIvIntegrals(g, T);
+    const A = I1 - I2 / T;
+    const B = I2 / T;
+    const c0 = (G / P0 - cdrRight * B) / A;
+    result.push({ startYr: left.year, endYr: right.year, startPop: P0, endPop: P1, cdrLeft: c0, cdrRight, g });
+    cdrRight = c0;
   }
-  return result;
+  return result.reverse();
 }
 
-/** Interpolate death rate at a given year from exponential intervals. */
-function interpExpRate(ivs: ExpIv[], year: number): number {
-  for (const iv of ivs) {
+const fitIvs = buildFitIntervals();
+
+/** Interpolate death rate at a given year. */
+function interpFitRate(year: number): number {
+  for (const iv of fitIvs) {
     if (year >= iv.startYr && year < iv.endYr) {
-      return iv.dLeft * Math.exp(iv.k * (year - iv.startYr));
+      const t = year - iv.startYr;
+      const T = iv.endYr - iv.startYr;
+      const cdr = iv.cdrLeft + (iv.cdrRight - iv.cdrLeft) * t / T;
+      const pop = iv.startPop * Math.exp(iv.g * t);
+      return cdr * pop;
     }
   }
-  const last = ivs[ivs.length - 1];
-  return last.dRight;
+  const last = fitIvs[fitIvs.length - 1];
+  return last.cdrRight * last.endPop;
 }
 
 /** OWID actual deaths keyed by year for O(1) lookup. */
@@ -83,8 +87,7 @@ const lastOwidDeaths = deathsOwid[deathsOwid.length - 1][1];
  *  • 1950–2023: OWID actuals
  *  • 2024+: extrapolate last OWID value
  */
-function buildAnnualDeaths(startYear: number, endYear: number, cdr0 = 0.035): Float64Array {
-  const ivs = buildExpIntervals(cdr0);
+function buildAnnualDeaths(startYear: number, endYear: number): Float64Array {
   const len = endYear - startYear;
   const deaths = new Float64Array(len);
   for (let i = 0; i < len; i++) {
@@ -95,7 +98,7 @@ function buildAnnualDeaths(startYear: number, endYear: number, cdr0 = 0.035): Fl
     } else if (y > lastOwidYear) {
       deaths[i] = lastOwidDeaths;
     } else {
-      deaths[i] = interpExpRate(ivs, y);
+      deaths[i] = interpFitRate(y);
     }
   }
   return deaths;
@@ -182,7 +185,7 @@ export class Graveyard {
   private readonly _gravesPerPeriod: Float64Array;
   private readonly _deathsPerYearMid: Float64Array;
 
-  constructor(periodLength: number, maxGraves: number, ancientCircleRadius: number = 1800) {
+  constructor(periodLength: number, maxGraves: number, ancientCircleRadius: number = 20000) {
     this.periodLength = periodLength;
     this.maxGraves = maxGraves;
     this.ancientCircleRadius = ancientCircleRadius;
