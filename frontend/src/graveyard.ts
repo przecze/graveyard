@@ -1,76 +1,25 @@
-import rawPrbData from './data.json';
 import deathsOwid from './deathsOwid';
+import {
+  ANCIENT_GRAVES, DATA_START, PRESENT_YEAR,
+  fitIntervals, type FitInterval,
+} from './fitModel';
 
 // ----------------------------------------------------------------
-// Death-rate estimation from PRB grave-count data + OWID
+// Death-rate interpolation from fit intervals + OWID
 // ----------------------------------------------------------------
 
-const DATA_START = -8000;    // 8000 BCE = start of ring model
-const PRESENT_YEAR = 2026;
-
-/**
- * Right-anchored fit: exponential population × linear CDR per interval.
- *   pop(t) = P0·e^(g·t),  g = ln(P1/P0)/T
- *   CDR(t) = c0 + (c1−c0)·t/T
- *   d(t)   = CDR(t)·pop(t)
- * Integral: P0·[c0·A + c1·B] = G where A,B from ∫e^(gt) and ∫t·e^(gt).
- * Anchor: 1950 OWID death rate → chain right-to-left.
- */
-interface FitIv {
-  startYr: number; endYr: number;
-  startPop: number; endPop: number;
-  cdrLeft: number; cdrRight: number;
-  g: number;
-}
-
-function computeIvIntegrals(g: number, T: number): { I1: number; I2: number } {
-  if (Math.abs(g * T) < 1e-10) return { I1: T, I2: T * T / 2 };
-  const egT = Math.exp(g * T);
-  return { I1: (egT - 1) / g, I2: T * egT / g - (egT - 1) / (g * g) };
-}
-
-function buildFitIntervals(): FitIv[] {
-  const entries = Object.entries(rawPrbData as Record<string, { graves: number; pop: number }>)
-    .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
-    .sort((a, b) => a.year - b.year);
-
-  const d1950 = deathsOwid[0][1];
-  const p1950 = entries[entries.length - 1].pop;
-  let cdrRight = d1950 / p1950;
-
-  const result: FitIv[] = [];
-  for (let i = entries.length - 1; i >= 1; i--) {
-    const left = entries[i - 1];
-    const right = entries[i];
-    const T = right.year - left.year;
-    const P0 = left.pop;
-    const P1 = right.pop;
-    const G = right.graves;
-    const g = Math.log(P1 / P0) / T;
-    const { I1, I2 } = computeIvIntegrals(g, T);
-    const A = I1 - I2 / T;
-    const B = I2 / T;
-    const c0 = (G / P0 - cdrRight * B) / A;
-    result.push({ startYr: left.year, endYr: right.year, startPop: P0, endPop: P1, cdrLeft: c0, cdrRight, g });
-    cdrRight = c0;
-  }
-  return result.reverse();
-}
-
-const fitIvs = buildFitIntervals();
-
-/** Interpolate death rate at a given year. */
+/** Interpolate death rate at a given calendar year. */
 function interpFitRate(year: number): number {
-  for (const iv of fitIvs) {
-    if (year >= iv.startYr && year < iv.endYr) {
-      const t = year - iv.startYr;
-      const T = iv.endYr - iv.startYr;
+  for (const iv of fitIntervals) {
+    if (year >= iv.startYear && year < iv.endYear) {
+      const t = year - iv.startYear;
+      const T = iv.endYear - iv.startYear;
       const cdr = iv.cdrLeft + (iv.cdrRight - iv.cdrLeft) * t / T;
       const pop = iv.startPop * Math.exp(iv.g * t);
       return cdr * pop;
     }
   }
-  const last = fitIvs[fitIvs.length - 1];
+  const last = fitIntervals[fitIntervals.length - 1];
   return last.cdrRight * last.endPop;
 }
 
@@ -83,7 +32,7 @@ const lastOwidDeaths = deathsOwid[deathsOwid.length - 1][1];
  * Build an array of annual deaths from `startYear` (inclusive)
  * to `endYear` (exclusive).  Index i → year startYear + i.
  *
- *  • Pre-1950: PRB interval constant rate
+ *  • Pre-1950: PRB interval fitted rate
  *  • 1950–2023: OWID actuals
  *  • 2024+: extrapolate last OWID value
  */
@@ -124,7 +73,7 @@ export interface BoundaryNeighbor {
 
 export interface ChunkInfo {
   period: number;
-  chunkId: number;
+  chunk: number;
   /** Clockwise edge angle (radians). */
   angleStart: number;
   /** Anticlockwise edge angle (radians). */
@@ -153,14 +102,6 @@ export interface PeriodStats {
   deathsPerYear: number;
   chunks: number;
 }
-
-// ----------------------------------------------------------------
-// Ancient graves (first entry in data.json = all graves before 8000 BCE)
-// ----------------------------------------------------------------
-const prbSorted = Object.entries(rawPrbData as Record<string, { graves: number; pop: number }>)
-  .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
-  .sort((a, b) => a.year - b.year);
-const ANCIENT_GRAVES = prbSorted[0].graves;   // ~9 billion
 
 // ----------------------------------------------------------------
 // Graveyard class — data-driven, with ancient circle
@@ -277,30 +218,30 @@ export class Graveyard {
   }
 
   /** Angle range of a chunk in radians: [start, end). Accounts for odd-period offset. */
-  chunkAngle(period: number, chunkId: number): [number, number] {
+  chunkAngle(period: number, chunk: number): [number, number] {
     const N = this.chunksInPeriod(period);
     const off = this.chunkOffset(period);
     return [
-      ((chunkId + off) / N) * 2 * Math.PI,
-      ((chunkId + 1 + off) / N) * 2 * Math.PI,
+      ((chunk + off) / N) * 2 * Math.PI,
+      ((chunk + 1 + off) / N) * 2 * Math.PI,
     ];
   }
 
   /**
-   * Stateless chunk info: provide (period, chunkId), get back everything
+   * Stateless chunk info: provide (period, chunk), get back everything
    * about that chunk including neighbor boundaries with local coordinates.
    */
-  getChunkInfo(period: number, chunkId: number): ChunkInfo {
+  getChunkInfo(period: number, chunk: number): ChunkInfo {
     const N = this.chunksInPeriod(period);
     const off = this.chunkOffset(period);
-    const myStart = (chunkId + off) / N;       // normalized, may exceed 1
-    const myEnd = (chunkId + 1 + off) / N;
+    const myStart = (chunk + off) / N;       // normalized, may exceed 1
+    const myEnd = (chunk + 1 + off) / N;
 
     const periodGraves = this.gravesInPeriod(period);
 
     // Same-period angular neighbors (offset doesn't change these)
-    const clockwise = N > 1 ? { period, chunk: (chunkId - 1 + N) % N } : null;
-    const anticlockwise = N > 1 ? { period, chunk: (chunkId + 1) % N } : null;
+    const clockwise = N > 1 ? { period, chunk: (chunk - 1 + N) % N } : null;
+    const anticlockwise = N > 1 ? { period, chunk: (chunk + 1) % N } : null;
 
     // Inner radial boundary neighbors
     const inner: BoundaryNeighbor[] = [];
@@ -332,7 +273,7 @@ export class Graveyard {
 
     return {
       period,
-      chunkId,
+      chunk,
       angleStart: myStart * 2 * Math.PI,
       angleEnd: myEnd * 2 * Math.PI,
       graves: periodGraves / N,

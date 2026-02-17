@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react';
 import { Graveyard, type ChunkInfo, type ChunkAddr, type BoundaryNeighbor } from './graveyard';
+import { PRESENT_YEAR } from './fitModel';
 import PopulationChart from './PopulationChart';
+import DensityHeatmap from './DensityHeatmap';
 import './App.css';
 
 // ----------------------------------------------------------------
@@ -14,10 +16,8 @@ function fmtCount(n: number): string {
   return n.toFixed(0);
 }
 
-const CURRENT_YEAR = 2026;
-
 function fmtCalendarYear(yearsAgo: number): string {
-  const year = Math.round(CURRENT_YEAR - yearsAgo);
+  const year = Math.round(PRESENT_YEAR - yearsAgo);
   if (year <= 0) return `${Math.abs(year - 1)} BC`;
   return `${year} AD`;
 }
@@ -88,7 +88,7 @@ function FocusedView({
   gy: Graveyard;
   chunkInfo: ChunkInfo;
 }) {
-  const { period: selP, chunkId: selC, neighbors } = chunkInfo;
+  const { period: selP, chunk: selC, neighbors } = chunkInfo;
   const P = gy.periodLength;
   const yc = gy.ancientCircleRadius;
 
@@ -180,10 +180,11 @@ function sectorBBox(
 function ChunkSoloView({ gy, chunkInfo }: { gy: Graveyard; chunkInfo: ChunkInfo }) {
   const { period, angleStart, angleEnd, periodChunks } = chunkInfo;
   const PL = gy.periodLength;
+  const yc = gy.ancientCircleRadius;
   const N = periodChunks;
 
-  const rI = period * PL;
-  const rO = (period + 1) * PL;
+  const rI = yc + period * PL;
+  const rO = yc + (period + 1) * PL;
   let a1 = angleStart;
   let a2 = angleEnd;
   if (N === 1) { a1 = 0; a2 = 2 * Math.PI; }
@@ -325,6 +326,9 @@ export default function App() {
         <PopulationChart yc={ancientCircleRadius} onYcChange={setAncientCircleRadius} />
       </div>
 
+      <h2 className="chart-title">Density heatmap</h2>
+      <DensityHeatmap gy={gy} />
+
       <div className="controls">
         <label className="ctrl">
           <span>Period length: <b>{periodLength} years</b></span>
@@ -384,6 +388,22 @@ export default function App() {
             <div className="tess-info-item">
               <span className="tess-label">Graves / chunk</span>
               <span className="tess-value">{fmtCount(chunkInfo.graves)}</span>
+            </div>
+            <div className="tess-info-item">
+              <span className="tess-label">Arc width (yr)</span>
+              <span className="tess-value">
+                {(() => {
+                  const rMid = gy.ancientCircleRadius + (safePeriod + 0.5) * periodLength;
+                  const astep = 2 * Math.PI / chunkInfo.periodChunks;
+                  const arcW = rMid * astep;
+                  const sf = gy.scalingFactor(safePeriod);
+                  return `${arcW.toFixed(1)} → ${(arcW * sf).toFixed(1)} (×${sf.toFixed(4)})`;
+                })()}
+              </span>
+            </div>
+            <div className="tess-info-item">
+              <span className="tess-label">Radial width (yr)</span>
+              <span className="tess-value">{periodLength}</span>
             </div>
           </div>
 
