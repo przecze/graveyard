@@ -17,6 +17,26 @@ services:
       - localnet
     restart: unless-stopped
 
+  geo:
+    image: python:3.13-slim
+    working_dir: /app
+    command: >
+      bash -c "pip install 'uv>=0.9.28' &&
+      uv pip install --system --no-cache-dir -r requirements.txt &&
+      streamlit run app.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.baseUrlPath=/geo
+      --server.enableXsrfProtection=true
+      --browser.gatherUsageStats=false
+      --server.fileWatcherType=poll"
+    volumes:
+      - ./geo/app.py:/app/app.py:ro
+      - ./geo/requirements.txt:/app/requirements.txt:ro
+    networks:
+      - localnet
+    restart: unless-stopped
+
   nginx:
     image: nginx:alpine
     volumes:

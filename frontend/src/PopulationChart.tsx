@@ -1,116 +1,17 @@
-import { useMemo } from 'react';
-import {
-  ComposedChart, Line, XAxis, YAxis,
-  Tooltip, ResponsiveContainer, CartesianGrid, Legend,
-} from 'recharts';
-import rawData from './data.json';
+import { useMemo, useState } from 'react';
+import Plot from 'react-plotly.js';
 import deathsOwid from './deathsOwid';
-
-// ----------------------------------------------------------------
-// PRB table (data.json) format:
-//   "-8000": { graves: A, pop: 5_000_000 }   ← ancient graves
-//   "1":     { graves: 46B, pop: 300_000_000 } ← graves from -8000→1
-//   ...
-//   "1950":  { graves: 3.4B, pop: 2_499_000_000 }
-// Then OWID takes over from 1950.
-// ----------------------------------------------------------------
-
-const START_YEAR = -8000;
-const END_YEAR = 2026;
-
-interface PrbEntry { year: number; graves: number; pop: number }
-
-const prbEntries: PrbEntry[] = Object.entries(
-  rawData as Record<string, { graves: number; pop: number }>,
-)
-  .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
-  .sort((a, b) => a.year - b.year);
-
-/** A = ancient graves (all before 8000 BCE). */
-export const ANCIENT_GRAVES = prbEntries[0].graves;
-
-// ----------------------------------------------------------------
-// Right-anchored fit: exponential population × linear CDR.
-//
-// For each interval [y0, y1], T = y1 − y0:
-//   pop(t) = P0 · e^(g·t),  g = ln(P1/P0) / T,  t ∈ [0,T]
-//   CDR(t) = c0 + (c1−c0)·t/T                    (linear)
-//   d(t)   = CDR(t) · pop(t)                      (deaths/yr)
-//
-// Integral constraint:  ∫₀ᵀ d(t) dt = G
-//   P0·[c0·A + c1·B] = G
-//   where A = I1 − I2/T,  B = I2/T
-//     I1 = ∫₀ᵀ e^(gt) dt
-//     I2 = ∫₀ᵀ t·e^(gt) dt
-//
-// Given c1 (CDR at right edge), solve:
-//   c0 = (G/P0 − c1·B) / A
-//
-// Anchor: at 1950 the OWID death rate gives c1 of the last interval.
-// Chain right→left: c0 of interval i becomes c1 of interval i−1.
-// ----------------------------------------------------------------
-
-interface FitInterval {
-  startYear: number; endYear: number;
-  startPop: number;  endPop: number;
-  graves: number;
-  cdrLeft: number;   cdrRight: number;
-  g: number; // population growth rate
-}
-
-function computeIntegrals(g: number, T: number): { I1: number; I2: number } {
-  if (Math.abs(g * T) < 1e-10) {
-    return { I1: T, I2: T * T / 2 };
-  }
-  const egT = Math.exp(g * T);
-  const I1 = (egT - 1) / g;
-  const I2 = T * egT / g - (egT - 1) / (g * g);
-  return { I1, I2 };
-}
-
-function buildFitIntervals(): FitInterval[] {
-  // Anchor at 1950: OWID death rate
-  const d1950 = deathsOwid[0][1];
-  const p1950 = prbEntries[prbEntries.length - 1].pop;
-  let cdrRight = d1950 / p1950;
-
-  const result: FitInterval[] = [];
-
-  // Work backwards through PRB intervals
-  for (let i = prbEntries.length - 1; i >= 1; i--) {
-    const left = prbEntries[i - 1];
-    const right = prbEntries[i];
-    const T = right.year - left.year;
-    const P0 = left.pop;
-    const P1 = right.pop;
-    const G = right.graves;
-    const g = Math.log(P1 / P0) / T;
-
-    const { I1, I2 } = computeIntegrals(g, T);
-    const A = I1 - I2 / T;
-    const B = I2 / T;
-    const c1 = cdrRight;
-    const c0 = (G / P0 - c1 * B) / A;
-
-    result.push({
-      startYear: left.year, endYear: right.year,
-      startPop: P0, endPop: P1,
-      graves: G,
-      cdrLeft: c0, cdrRight: c1,
-      g,
-    });
-
-    cdrRight = c0; // chain: left CDR becomes right CDR of next interval
-  }
-
-  return result.reverse(); // chronological order
-}
-
-const fitIntervals = buildFitIntervals();
+import {
+  ANCIENT_GRAVES, DATA_START, PRESENT_YEAR,
+  fitIntervals, computeIntegrals, prbEntries,
+} from './fitModel';
 
 // ----------------------------------------------------------------
 // Deaths-per-year series from fitted intervals + OWID
 // ----------------------------------------------------------------
+
+const START_YEAR = DATA_START;
+const END_YEAR = PRESENT_YEAR;
 
 interface DeathsPt { year: number; deathsPerYear: number }
 
@@ -127,11 +28,9 @@ function buildDeathsPerYear(): DeathsPt[] {
       pts.push({ year: y, deathsPerYear: cdr * pop });
     }
   }
-  // Last PRB point
   const last = fitIntervals[fitIntervals.length - 1];
   pts.push({ year: last.endYear, deathsPerYear: last.cdrRight * last.endPop });
 
-  // OWID from 1950 onward
   for (const [year, d] of deathsOwid) {
     pts.push({ year, deathsPerYear: d });
   }
@@ -142,19 +41,56 @@ function buildDeathsPerYear(): DeathsPt[] {
 // Available graves from ancient circle density
 // ----------------------------------------------------------------
 
-interface AncientPt { year: number; availAncient: number }
-
-function buildAncientDensitySeries(yc: number): AncientPt[] {
+function buildAncientDensitySeries(yc: number): { years: number[]; vals: number[] } {
   const A = ANCIENT_GRAVES;
   const yc2 = yc * yc;
-  const pts: AncientPt[] = [];
+  const years: number[] = [];
+  const vals: number[] = [];
   for (let calYear = START_YEAR; calYear <= END_YEAR; calYear += 10) {
     const y = calYear - START_YEAR;
-    pts.push({ year: calYear, availAncient: A * (2 * (yc + y) + 1) / yc2 });
+    years.push(calYear);
+    vals.push(A * (2 * (yc + y) + 1) / yc2);
   }
   const yLast = END_YEAR - START_YEAR;
-  pts.push({ year: END_YEAR, availAncient: A * (2 * (yc + yLast) + 1) / yc2 });
-  return pts;
+  years.push(END_YEAR);
+  vals.push(A * (2 * (yc + yLast) + 1) / yc2);
+  return { years, vals };
+}
+
+// ----------------------------------------------------------------
+// Density series: graves/yr²
+// X axis = radius coordinate = calYear - DATA_START + yc (true log scale)
+// ----------------------------------------------------------------
+
+interface DensityPt { yearsAgo: number; density: number }
+
+function buildDensityData(yc: number): DensityPt[] {
+  const ancientDensity = ANCIENT_GRAVES / (Math.PI * yc * yc);
+
+  const pts: DensityPt[] = [];
+
+  // Ancient circle: yearsAgo spans from (PRESENT_YEAR - DATA_START) down to
+  // (PRESENT_YEAR - DATA_START) - yc, sampled on a log grid
+  const maxYearsAgo = PRESENT_YEAR - DATA_START;
+  const ancientEdgeYearsAgo = maxYearsAgo; // yearsAgo at r=yc boundary = yc mapped back
+  const steps = 80;
+  for (let i = 0; i <= steps; i++) {
+    // log-spaced from ancientEdgeYearsAgo down toward large yearsAgo
+    const yearsAgo = ancientEdgeYearsAgo * Math.exp(Math.log(3) * i / steps);
+    pts.push({ yearsAgo, density: ancientDensity });
+  }
+
+  // Ring model: yearsAgo = PRESENT_YEAR - calYear
+  for (const pt of buildDeathsPerYear()) {
+    const yearsAgo = PRESENT_YEAR - pt.year;
+    if (yearsAgo <= 0) continue;
+    const r = pt.year - DATA_START + yc;
+    if (r > 0) {
+      pts.push({ yearsAgo, density: pt.deathsPerYear / (2 * Math.PI * r) });
+    }
+  }
+
+  return pts.sort((a, b) => a.yearsAgo - b.yearsAgo);
 }
 
 // ----------------------------------------------------------------
@@ -172,6 +108,36 @@ const fmtPop = (v: number) => {
 const fmtYear = (y: number) => (y <= 0 ? `${Math.abs(y)} BC` : `${y}`);
 
 // ----------------------------------------------------------------
+// Shared Plotly dark layout
+// ----------------------------------------------------------------
+
+const DARK_LAYOUT: Partial<Plotly.Layout> = {
+  paper_bgcolor: 'transparent',
+  plot_bgcolor: 'transparent',
+  font: { color: '#999', size: 11 },
+  margin: { t: 10, r: 30, b: 50, l: 70 },
+  xaxis: {
+    gridcolor: '#222',
+    zerolinecolor: '#333',
+    tickfont: { color: '#666', size: 11 },
+  },
+  yaxis: {
+    gridcolor: '#222',
+    zerolinecolor: '#333',
+    tickfont: { color: '#666', size: 11 },
+  },
+  legend: {
+    font: { color: '#999', size: 12 },
+    bgcolor: 'transparent',
+  },
+};
+
+const PLOTLY_CONFIG: Partial<Plotly.Config> = {
+  displayModeBar: false,
+  responsive: true,
+};
+
+// ----------------------------------------------------------------
 // Component
 // ----------------------------------------------------------------
 
@@ -182,7 +148,18 @@ interface Props {
 
 export default function PopulationChart({ yc, onYcChange }: Props) {
   const deathsData = useMemo(buildDeathsPerYear, []);
-  const ancientData = useMemo(() => buildAncientDensitySeries(yc), [yc]);
+  const ancientSeries = useMemo(() => buildAncientDensitySeries(yc), [yc]);
+  const [logY, setLogY] = useState(false);
+  const densityData = useMemo(() => buildDensityData(yc), [yc]);
+  const ancientCircleDensity = ANCIENT_GRAVES / (Math.PI * yc * yc);
+
+  // ---- Chart 1: Deaths per year ----
+  const deathsYears = useMemo(() => deathsData.map(d => d.year), [deathsData]);
+  const deathsVals = useMemo(() => deathsData.map(d => d.deathsPerYear), [deathsData]);
+
+  // ---- Chart 2: Density ----
+  const densityX = useMemo(() => densityData.map(d => d.yearsAgo), [densityData]);
+  const densityY = useMemo(() => densityData.map(d => d.density), [densityData]);
 
   return (
     <>
@@ -198,41 +175,46 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
         &nbsp;&middot;&nbsp; density = A/yc&sup2; = {(ANCIENT_GRAVES / (yc * yc)).toFixed(2)}/yr&sup2;
       </div>
 
-      {/* Chart */}
-      <ResponsiveContainer width="100%" height={400}>
-        <ComposedChart margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#222" />
-          <XAxis
-            dataKey="year" type="number" domain={[START_YEAR, END_YEAR]}
-            tick={{ fill: '#666', fontSize: 11 }} tickFormatter={fmtYear}
-          />
-          <YAxis
-            scale="log" domain={[1e5, 1e9]}
-            tick={{ fill: '#666', fontSize: 11 }} tickFormatter={fmtPop}
-            allowDataOverflow
-          />
-          <Tooltip
-            formatter={(v: number, name: string) => [fmtPop(v), name]}
-            labelFormatter={fmtYear}
-            contentStyle={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: 4 }}
-            itemStyle={{ color: '#ccc' }} labelStyle={{ color: '#999' }}
-          />
-          <Legend wrapperStyle={{ fontSize: 12, color: '#999' }} />
-          <Line
-            name="Graves/yr" data={deathsData} dataKey="deathsPerYear"
-            stroke="#e06c75" strokeWidth={2} dot={false}
-          />
-          <Line
-            name="Available (ancient circle density)"
-            data={ancientData} dataKey="availAncient"
-            stroke="#61afef" strokeWidth={2} dot={false}
-            strokeDasharray="6 3"
-          />
-        </ComposedChart>
-      </ResponsiveContainer>
+      {/* Chart 1: Deaths per year */}
+      <Plot
+        data={[
+          {
+            x: deathsYears,
+            y: deathsVals,
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Graves/yr',
+            line: { color: '#e06c75', width: 2 },
+          },
+          {
+            x: ancientSeries.years,
+            y: ancientSeries.vals,
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Available (ancient circle density)',
+            line: { color: '#61afef', width: 2, dash: 'dash' },
+          },
+        ]}
+        layout={{
+          ...DARK_LAYOUT,
+          height: 400,
+          xaxis: {
+            ...DARK_LAYOUT.xaxis,
+            range: [START_YEAR, END_YEAR],
+          },
+          yaxis: {
+            ...DARK_LAYOUT.yaxis,
+            type: 'log',
+            range: [5, 9],
+          },
+        }}
+        config={PLOTLY_CONFIG}
+        useResizeHandler
+        style={{ width: '100%' }}
+      />
 
       {/* Interval table */}
-      <details style={{ marginTop: 12 }} open>
+      <details style={{ marginTop: 12 }}>
         <summary style={{ color: '#999', fontSize: 13, cursor: 'pointer' }}>
           Exp-pop &times; linear-CDR fit (anchored at 1950 OWID)
         </summary>
@@ -253,7 +235,6 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
           </thead>
           <tbody>
             {fitIntervals.map((iv, i) => {
-              // Reconstructed integral: P0 * [c0*A + c1*B]
               const T = iv.endYear - iv.startYear;
               const { I1, I2 } = computeIntegrals(iv.g, T);
               const A = I1 - I2 / T;
@@ -292,16 +273,90 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
             })}
             <tr style={{ borderBottom: '1px solid #333', color: '#888' }}>
               <td style={{ padding: '3px 6px' }}>1950 &rarr; (OWID anchor)</td>
-              <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(2499000000)}</td>
+              <td style={{ textAlign: 'right', padding: '3px 6px' }}>{fmtPop(prbEntries[prbEntries.length - 1].pop)}</td>
               <td style={{ textAlign: 'right', padding: '3px 6px' }}>&mdash;</td>
               <td style={{ textAlign: 'right', padding: '3px 6px' }}>
-                {(deathsOwid[0][1] / 2499000000 * 100).toFixed(2)}%
+                {(deathsOwid[0][1] / prbEntries[prbEntries.length - 1].pop * 100).toFixed(2)}%
               </td>
               <td colSpan={6} style={{ textAlign: 'right', padding: '3px 6px' }}>annual OWID data</td>
             </tr>
           </tbody>
         </table>
       </details>
+
+      {/* Chart 2: Density — true log X scale */}
+      <div style={{ marginTop: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 6 }}>
+          <div style={{ fontSize: 13, color: '#999' }}>
+            Grave density &mdash; graves/yr&sup2; = deaths/yr &divide; (2&pi;&thinsp;&times;&thinsp;X)
+            &nbsp;&middot;&nbsp;
+            ancient circle: {ancientCircleDensity.toExponential(3)}/yr&sup2;
+          </div>
+          <button
+            onClick={() => setLogY(v => !v)}
+            style={{
+              fontSize: 11, padding: '2px 10px', borderRadius: 4, cursor: 'pointer',
+              background: logY ? '#4ecdc4' : '#222',
+              color: logY ? '#111' : '#888',
+              border: '1px solid ' + (logY ? '#4ecdc4' : '#333'),
+              flexShrink: 0,
+            }}
+          >
+            Y: {logY ? 'log' : 'linear'}
+          </button>
+        </div>
+        <Plot
+          data={[
+            {
+              x: densityX,
+              y: densityY,
+              type: 'scatter',
+              mode: 'lines',
+              name: 'Density (graves/yr²)',
+              line: { color: '#e06c75', width: 2 },
+            },
+          ]}
+          layout={{
+            ...DARK_LAYOUT,
+            height: 320,
+            xaxis: {
+              ...DARK_LAYOUT.xaxis,
+              type: 'log',
+              autorange: 'reversed',
+              title: { text: 'Years ago', font: { color: '#555', size: 11 }, standoff: 8 },
+              tickformat: ',d',
+            },
+            yaxis: {
+              ...DARK_LAYOUT.yaxis,
+              type: logY ? 'log' : 'linear',
+              title: { text: 'graves / yr²', font: { color: '#555', size: 11 }, standoff: 8 },
+              rangemode: logY ? undefined : 'tozero',
+            },
+            shapes: [
+              {
+                type: 'line',
+                x0: PRESENT_YEAR - DATA_START, x1: PRESENT_YEAR - DATA_START,
+                y0: 0, y1: 1,
+                xref: 'x', yref: 'paper',
+                line: { color: '#61afef', width: 1.5, dash: 'dash' },
+              },
+            ],
+            annotations: [
+              {
+                x: Math.log10(PRESENT_YEAR - DATA_START),
+                y: 1, xref: 'x', yref: 'paper',
+                text: `ancient edge (${PRESENT_YEAR - DATA_START} yr ago)`,
+                showarrow: false,
+                font: { color: '#61afef', size: 10 },
+                yanchor: 'bottom',
+              },
+            ],
+          }}
+          config={PLOTLY_CONFIG}
+          useResizeHandler
+          style={{ width: '100%' }}
+        />
+      </div>
     </>
   );
 }

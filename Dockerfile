@@ -6,7 +6,7 @@ FROM node:24-alpine AS builder
 WORKDIR /app
 
 # Copy package files from frontend/
-COPY frontend/package.json frontend/package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json* frontend/.npmrc* ./
 RUN npm ci
 
 # Copy frontend source and build
@@ -32,7 +32,7 @@ FROM node:24-alpine AS development
 WORKDIR /app
 
 # Copy package files
-COPY frontend/package.json frontend/package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json* frontend/.npmrc* ./
 RUN npm ci
 
 # Copy source (will be overridden by volumes in docker-compose)
