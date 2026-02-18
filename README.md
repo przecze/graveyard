@@ -43,7 +43,19 @@ Plotly used for visualizations related to math exploration.
 React app with sliders for controlling various variables of the simulation (radius of the ancient circle, chunk size, max graves per chunk etc.) and observing the resulting graveyard plan and statistics
 A streamlit (Python) app for exploring the advanced math quickly.
 
-## Minimal goal and technical requirements (not completed)
+## Next steps
+* Experiment with curved ancient circle - might fit more graves on smaller radius without compromising the (global!) density
+* Basic time math - time to get to the edge depending on speed / number of graves passed per second
+* Trajectory simulations, mostly to double check the math: spawn at point (r, f) go df for n steps, plot the trajectory on radial. how quickly to you get back. What if you go to (r,f) and then continue in a geodesic in arbitrary direction?
+* Update chunk math for curved space, also add time calculations (number of chunks until the edge, chunks loaded per second)
+* View port basic math with size sliders (number of chunks in view port, number of graves in view port, curvature change between edges)
+* View port experiments - toy layout with constant curvature and grid points. what do you see at various points? snapshots of moving away from the center. animation of moving away from the center, interactive "hover over map to render view port below", interactive "press arrows to move view port"
+
+### View port ideas
+* Circle? 2.5d? Rotation: always edge-ward /center-ward on top?
+* Is view port constant area? Or edges are line-fragments from the surface in right distance? Or collection of graves with distance less than X. Shape of the view port on surface?
+
+## Minimal prototype and technical requirements (not completed)
 A 2D explorable space you can open in your browser, walk around using your keyboard.
 You can get from the center (your starting point) to the edge of the graveyard within 1h.
 You see graves rendered on your screen on their positions top-down, with your position in the center of the screen.
@@ -74,6 +86,7 @@ Exact positions of 100B graves are not stored in any DB, they are generated on t
 * On the edge, see new graves forming in real time based on known death rates.
 * The Frontier of Light - represent whole humanity here, not only the dead
   * What if instead of grave, we have candles. For dead people already put down, but for the living 9B individuals there are many alight candles at the edge. Close to edge you see some candles being alight (some people born in early 20th century are still alive) and at the edge and beyond its (almost) only light. You see candles going off based on death rates. You see new candles appear at the edge based on birth rates
+* Visited by N players before / Last visited - this feature might be implementable without a huge database if we do it on the chunk level. Then players can see if they are taking a new path through the space and seeing the graves noone has seen before. Just increment count for the chunk id every time a player enters
 # About the author
 [janczechowski.com](https://janczechowski.com)
 
