@@ -31,8 +31,8 @@ services:
       --browser.gatherUsageStats=false
       --server.fileWatcherType=poll"
     volumes:
-      - ./geo/app.py:/app/app.py:ro
-      - ./geo/requirements.txt:/app/requirements.txt:ro
+      - ./geo:/app:ro
+      - ./frontend/src/data.json:/data/data.json:ro
     networks:
       - localnet
     restart: unless-stopped

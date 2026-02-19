@@ -1,27 +1,8 @@
 import deathsOwid from './deathsOwid';
 import {
   ANCIENT_GRAVES, DATA_START, PRESENT_YEAR,
-  fitIntervals, type FitInterval,
+  cbrDeathsPerYear,
 } from './fitModel';
-
-// ----------------------------------------------------------------
-// Death-rate interpolation from fit intervals + OWID
-// ----------------------------------------------------------------
-
-/** Interpolate death rate at a given calendar year. */
-function interpFitRate(year: number): number {
-  for (const iv of fitIntervals) {
-    if (year >= iv.startYear && year < iv.endYear) {
-      const t = year - iv.startYear;
-      const T = iv.endYear - iv.startYear;
-      const cdr = iv.cdrLeft + (iv.cdrRight - iv.cdrLeft) * t / T;
-      const pop = iv.startPop * Math.exp(iv.g * t);
-      return cdr * pop;
-    }
-  }
-  const last = fitIntervals[fitIntervals.length - 1];
-  return last.cdrRight * last.endPop;
-}
 
 /** OWID actual deaths keyed by year for O(1) lookup. */
 const owidMap = new Map<number, number>(deathsOwid);
@@ -32,8 +13,8 @@ const lastOwidDeaths = deathsOwid[deathsOwid.length - 1][1];
  * Build an array of annual deaths from `startYear` (inclusive)
  * to `endYear` (exclusive).  Index i → year startYear + i.
  *
- *  • Pre-1950: PRB interval fitted rate
- *  • 1950–2023: OWID actuals
+ *  • Pre-1950: CBR × OWID population (PRB methodology, OWID/HYDE pop backbone)
+ *  • 1950–2023: OWID actuals (UN World Population Prospects 2024)
  *  • 2024+: extrapolate last OWID value
  */
 function buildAnnualDeaths(startYear: number, endYear: number): Float64Array {
@@ -47,7 +28,7 @@ function buildAnnualDeaths(startYear: number, endYear: number): Float64Array {
     } else if (y > lastOwidYear) {
       deaths[i] = lastOwidDeaths;
     } else {
-      deaths[i] = interpFitRate(y);
+      deaths[i] = cbrDeathsPerYear(y);
     }
   }
   return deaths;

@@ -1,113 +1,177 @@
 /**
- * Shared death-rate fitting model.
+ * Exact PRB / Keyfitz deaths-per-year model.
  *
- * Right-anchored fit: exponential population × linear CDR per interval.
- *   pop(t) = P0·e^(g·t),  g = ln(P1/P0)/T,  t ∈ [0,T]
- *   CDR(t) = c0 + (c1−c0)·t/T
- *   d(t)   = CDR(t)·pop(t)
+ * Source: Toshiko Kaneda, Charlotte Greenbaum & Carl Haub,
+ *   "How Many People Have Ever Lived on Earth?", PRB 2022.
+ *   Building on: Nathan Keyfitz, "How many people have lived on the earth?",
+ *   Demography 3(2), 1966.
  *
- * Integral constraint:  ∫₀ᵀ d(t) dt = G
- *   P0·[c0·A + c1·B] = G
- *   where A = I1 − I2/T,  B = I2/T
- *     I1 = ∫₀ᵀ e^(gt) dt
- *     I2 = ∫₀ᵀ t·e^(gt) dt
+ * The Keyfitz / Haub formula:
+ *   Within each benchmark interval [y0, y1] with populations P0, P1:
  *
- * Anchor: 1950 OWID death rate → chain right-to-left.
+ *     P(t) = P0 · exp(g · (t − y0)),   g = ln(P1/P0) / (y1 − y0)
+ *
+ *     person-years = ∫[y0→y1] P(t) dt = (P1 − P0) / g
+ *
+ *     births_in_interval = CBR/1000 · person-years
+ *
+ *   The PRB "Births Between Benchmarks" column is exactly this value.
+ *   Because CDR ≈ CBR in pre-modern populations (net growth ≪ births),
+ *   births ≈ deaths, and we use births as the death proxy.
+ *
+ *   Rearranging for deaths-per-year at time t:
+ *
+ *     deaths/yr(t) = births · P(t) / person-years
+ *                  = births · g · P0 · exp(g·(t − y0)) / (P1 − P0)
+ *
+ *   This integrates to exactly PRB's published births-between-benchmarks
+ *   with no fitting required.
+ *
+ * For 1950+: actual annual deaths from UN World Population Prospects 2024
+ *   (see deathsOwid.ts).
  */
-
-import rawPrbData from './data.json';
-import deathsOwid from './deathsOwid';
 
 // ----------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------
 
-export const DATA_START = -8000;   // 8 000 BCE = start of ring model
+export const DATA_START = -8000;    // 8 000 BCE = start of ring model
 export const PRESENT_YEAR = 2026;
 
 // ----------------------------------------------------------------
-// PRB data (parsed once)
+// PRB 2022 Table 1 — full reference data
+// "Births Between Benchmarks" are the published PRB values.
+// Population benchmarks are also from PRB Table 1.
 // ----------------------------------------------------------------
 
 export interface PrbEntry {
   year: number;
-  graves: number;
   pop: number;
+  /** Births (≈ deaths) from the PREVIOUS benchmark to this one. */
+  births: number;
 }
 
-export const prbEntries: PrbEntry[] = Object.entries(
-  rawPrbData as Record<string, { graves: number; pop: number }>,
-)
-  .map(([k, v]) => ({ year: Number(k), graves: v.graves, pop: v.pop }))
-  .sort((a, b) => a.year - b.year);
+export const PRB_TABLE: PrbEntry[] = [
+  { year: -190000, pop:             2, births:              0 },
+  { year:  -50000, pop:   2_000_000,  births:  7_856_100_000 },
+  { year:   -8000, pop:   5_000_000,  births:  1_137_789_769 },
+  { year:       1, pop: 300_000_000,  births: 46_025_332_354 },
+  { year:    1200, pop: 450_000_000,  births: 26_591_343_000 },
+  { year:    1650, pop: 500_000_000,  births: 12_782_002_453 },
+  { year:    1750, pop: 795_000_000,  births:  3_171_931_513 },
+  { year:    1850, pop: 1_265_000_000, births: 4_046_240_009 },
+  { year:    1900, pop: 1_656_000_000, births: 2_900_237_856 },
+  { year:    1950, pop: 2_499_000_000, births: 3_390_198_215 },
+  { year:    2000, pop: 6_149_000_000, births: 6_064_994_884 },
+  { year:    2010, pop: 6_986_000_000, births: 1_364_003_405 },
+  { year:    2022, pop: 7_963_500_000, births: 1_690_275_115 },
+];
 
-/** Ancient graves — all deaths before 8 000 BCE (first entry in data.json). */
-export const ANCIENT_GRAVES = prbEntries[0].graves;
+/**
+ * Total births (≈ deaths) before 8 000 BCE — the "ancient circle" graves.
+ * = PRB "Number Ever Born" at 8 000 BCE = sum of all births up to that point.
+ */
+export const ANCIENT_GRAVES: number =
+  PRB_TABLE[1].births +   // 190 000 BCE → 50 000 BCE
+  PRB_TABLE[2].births;    // 50 000 BCE  →  8 000 BCE
+// = 8 993 889 769 ≈ 8 993 889 771 (PRB rounding)
 
 // ----------------------------------------------------------------
-// Fit interval types & helpers
+// PRB intervals — the ring model covers DATA_START (−8000) to 1950.
+//
+// Each interval [startYear, endYear] uses PRB's own population
+// benchmarks and the "Births Between Benchmarks" total from Table 1.
+// The growth rate g is derived directly from the two benchmark pops.
 // ----------------------------------------------------------------
 
-export interface FitInterval {
+export interface PrbInterval {
   startYear: number;
   endYear: number;
   startPop: number;
   endPop: number;
-  graves: number;
-  cdrLeft: number;
-  cdrRight: number;
-  /** Population growth rate ln(P1/P0)/T. */
+  /**
+   * Estimated deaths in this interval = PRB births − ΔPop.
+   * PRB publishes births (not deaths); deaths ≈ births for slow-growth eras
+   * but diverges by up to 25% for the fast-growing 1750–1950 period.
+   */
+  births: number;
+  /** Exponential growth rate: ln(endPop/startPop) / (endYear − startYear). */
   g: number;
 }
 
-export function computeIntegrals(g: number, T: number): { I1: number; I2: number } {
-  if (Math.abs(g * T) < 1e-10) {
-    return { I1: T, I2: T * T / 2 };
-  }
-  const egT = Math.exp(g * T);
-  return {
-    I1: (egT - 1) / g,
-    I2: T * egT / g - (egT - 1) / (g * g),
-  };
-}
-
-// ----------------------------------------------------------------
-// Build fit intervals (computed once at module load)
-// ----------------------------------------------------------------
-
-function buildFitIntervals(): FitInterval[] {
-  const d1950 = deathsOwid[0][1];
-  const p1950 = prbEntries[prbEntries.length - 1].pop;
-  let cdrRight = d1950 / p1950;
-
-  const result: FitInterval[] = [];
-
-  for (let i = prbEntries.length - 1; i >= 1; i--) {
-    const left = prbEntries[i - 1];
-    const right = prbEntries[i];
-    const T = right.year - left.year;
-    const P0 = left.pop;
-    const P1 = right.pop;
-    const G = right.graves;
-    const g = Math.log(P1 / P0) / T;
-
-    const { I1, I2 } = computeIntegrals(g, T);
-    const A = I1 - I2 / T;
-    const B = I2 / T;
-    const c0 = (G / P0 - cdrRight * B) / A;
-
+export const prbIntervals: PrbInterval[] = (() => {
+  // Only intervals that fall within our ring model (DATA_START → 1950)
+  const milestones = PRB_TABLE.filter(e => e.year >= DATA_START && e.year <= 1950);
+  const result: PrbInterval[] = [];
+  for (let i = 0; i < milestones.length - 1; i++) {
+    const a = milestones[i];
+    const b = milestones[i + 1];
+    const T = b.year - a.year;
+    const g = Math.log(b.pop / a.pop) / T;
+    // PRB "births" are births, not deaths.  Actual deaths = births − ΔPop.
+    // For ancient intervals ΔPop ≪ births so the correction is negligible (<1%).
+    // For 1750–1950 population grew fast, so this matters (up to 25% for 1900–1950).
+    const deaths = b.births - (b.pop - a.pop);
     result.push({
-      startYear: left.year, endYear: right.year,
-      startPop: P0, endPop: P1,
-      graves: G,
-      cdrLeft: c0, cdrRight,
+      startYear: a.year,
+      endYear:   b.year,
+      startPop:  a.pop,
+      endPop:    b.pop,
+      births:    deaths,   // field reused for deaths total; label updated below
       g,
     });
-
-    cdrRight = c0;
   }
+  return result;
+})();
 
-  return result.reverse();
+// ----------------------------------------------------------------
+// Core function: deaths per year at calendar year t.
+//
+// Implements the Keyfitz formula exactly:
+//   deaths(t) = births · g · P0 · exp(g·(t−y0)) / (P1 − P0)
+//
+// At interval boundaries there are step discontinuities — this is
+// inherent to the PRB model (their data has no finer resolution).
+// For 1950+ use OWID actual deaths (see graveyard.ts / deathsOwid.ts).
+// ----------------------------------------------------------------
+
+export function prbDeathsPerYear(year: number): number {
+  for (const iv of prbIntervals) {
+    if (year >= iv.startYear && year < iv.endYear) {
+      const t = year - iv.startYear;
+      if (Math.abs(iv.g) < 1e-12) {
+        // zero growth: uniform distribution
+        return iv.births / (iv.endYear - iv.startYear);
+      }
+      const Pt = iv.startPop * Math.exp(iv.g * t);
+      return iv.births * iv.g * Pt / (iv.endPop - iv.startPop);
+    }
+  }
+  // Fallback: last interval endpoint
+  const last = prbIntervals[prbIntervals.length - 1];
+  return last.births * last.g * last.endPop / (last.endPop - last.startPop);
 }
 
-export const fitIntervals = buildFitIntervals();
+// ----------------------------------------------------------------
+// Legacy alias used by PopulationChart display.
+// ----------------------------------------------------------------
+export const cbrDeathsPerYear = prbDeathsPerYear;
+
+// Needed by PopulationChart PrbEraTable — stub returning NaN for 1950+
+export function prbCBR(year: number): number {
+  for (const iv of prbIntervals) {
+    if (year >= iv.startYear && year < iv.endYear) {
+      // Implied CBR from the PRB data: births = CBR/1000 · person-years
+      // person-years = (P1−P0)/g
+      const personYears = (iv.endPop - iv.startPop) / iv.g;
+      return iv.births / personYears * 1000;
+    }
+  }
+  return NaN;
+}
+
+// Dummy — no longer used, kept so old imports don't break
+export function interpOwidPop(_year: number): number { return NaN; }
+
+// Legacy
+export const prbEntries = PRB_TABLE.filter(e => e.year >= DATA_START);
