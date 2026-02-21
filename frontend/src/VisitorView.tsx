@@ -6,15 +6,14 @@ const GRID_SPACING = 36;
 const GRAVE_RADIUS = 8;
 const FILLED_GRID_FRACTION = (2 / 3) * (4 / 5);
 const GRAVES_PER_PIXEL_SQ = FILLED_GRID_FRACTION / (GRID_SPACING * GRID_SPACING);
-const DEFAULT_GRAVE_DENSITY = 50; // graves / year^2
+const DEFAULT_GRAVE_DENSITY = 60; // graves / year^2
 const MIN_GRAVE_DENSITY = 5;
 const MAX_GRAVE_DENSITY = 200;
-const DEFAULT_SPEED = 0.9; // years per second
 const TRAVEL_DISTANCE_YEARS = 16000;
-const DEFAULT_TRAVEL_TIME_SECONDS = TRAVEL_DISTANCE_YEARS / DEFAULT_SPEED;
+const DEFAULT_TRAVEL_TIME_SECONDS = 2 * 60 * 60;
 const MIN_TRAVEL_TIME_SECONDS = 30;
 const MAX_TRAVEL_TIME_SECONDS = 5 * 60 * 60;
-const DEFAULT_VIEWPORT_WIDTH_YEARS = 3;
+const DEFAULT_VIEWPORT_WIDTH_YEARS = 4;
 const MIN_VIEWPORT_WIDTH_YEARS = 1;
 const MAX_VIEWPORT_WIDTH_YEARS = 20;
 const ACCELERATION = 7;
@@ -37,10 +36,21 @@ function formatDuration(totalSeconds: number): string {
   return `${(totalSeconds / 31557600).toFixed(2)}y`;
 }
 
+function formatNumber(value: number): string {
+  if (!Number.isFinite(value)) return 'n/a';
+  if (Math.abs(value) >= 1000) return Math.round(value).toLocaleString();
+  if (Math.abs(value) >= 10) return value.toFixed(1);
+  return value.toFixed(2);
+}
+
 export default function VisitorView() {
   const [travelTimeSeconds, setTravelTimeSeconds] = useState(DEFAULT_TRAVEL_TIME_SECONDS);
   const [graveDensity, setGraveDensity] = useState(DEFAULT_GRAVE_DENSITY);
   const [viewportWidthYears, setViewportWidthYears] = useState(DEFAULT_VIEWPORT_WIDTH_YEARS);
+  const [screenSize, setScreenSize] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const speedYearsPerSecondRef = useRef(TRAVEL_DISTANCE_YEARS / DEFAULT_TRAVEL_TIME_SECONDS);
   const graveDensityRef = useRef(graveDensity);
@@ -59,6 +69,14 @@ export default function VisitorView() {
   useEffect(() => {
     viewportWidthYearsRef.current = viewportWidthYears;
   }, [viewportWidthYears]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setScreenSize({ width: window.innerWidth, height: window.innerHeight });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -210,6 +228,14 @@ export default function VisitorView() {
     };
   }, []);
 
+  const speedYearsPerSecond = TRAVEL_DISTANCE_YEARS / Math.max(travelTimeSeconds, 0.0001);
+  const screenAspect = screenSize.height / Math.max(screenSize.width, 1);
+  const viewportHeightYears = viewportWidthYears * screenAspect;
+  const viewportAreaYearsSq = viewportWidthYears * viewportHeightYears;
+  const viewportTraverseSeconds = viewportWidthYears / speedYearsPerSecond;
+  const gravesInViewport = graveDensity * viewportAreaYearsSq;
+  const gravesPassedPerSecond = gravesInViewport / Math.max(viewportTraverseSeconds, 0.0001);
+
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative', overflow: 'hidden' }}>
       <canvas ref={canvasRef} />
@@ -232,7 +258,16 @@ export default function VisitorView() {
         }}
       >
         <div style={{ color: '#bfe7ff' }}>
-          Calculated speed: {(TRAVEL_DISTANCE_YEARS / travelTimeSeconds).toFixed(2)} years/s
+          Calculated speed: {speedYearsPerSecond.toFixed(2)} years/s
+        </div>
+        <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
+          Viewport traverse time: {formatDuration(viewportTraverseSeconds)}
+        </div>
+        <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
+          Graves in viewport: {formatNumber(gravesInViewport)}
+        </div>
+        <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
+          Graves passed per second: {formatNumber(gravesPassedPerSecond)}
         </div>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span>16k years travel time: {formatDuration(travelTimeSeconds)}</span>
