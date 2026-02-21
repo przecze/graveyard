@@ -628,6 +628,7 @@ def render() -> None:
         step=1,
         help="Density used for analytic flat-ancient calculations.",
     )
+    density = float(density_slider)
     cubic_segment_option = st.radio(
         "Cubic-fit segment",
         options=["1200 -> 1650", "1900 -> 1950", "None"],
@@ -659,12 +660,12 @@ def render() -> None:
             "Expected one of: cumulative_deaths_estimated, cumulative_births, cumulative."
         )
 
-    flat_deaths = np.pi * (flat_len_fit ** 2) * float(density_slider)
+    flat_deaths = np.pi * (flat_len_fit ** 2) * density
     late_ancient_deaths = ancient_total_deaths - flat_deaths
-    late_ancient_start_D = 2.0 * np.pi * flat_len_fit * float(density_slider)
+    late_ancient_start_D = 2.0 * np.pi * flat_len_fit * density
 
     print(f"[pre-fit] flat_len_years={flat_len_fit}")
-    print(f"[pre-fit] flat_density={float(density_slider):.6g} graves/yr^2")
+    print(f"[pre-fit] flat_density={density:.6g} graves/yr^2")
     print(f"[pre-fit] flat_deaths=pi*L^2*density={flat_deaths:.6e}")
     print(f"[pre-fit] late_ancient_deaths=ancient_total-flat={late_ancient_deaths:.6e}")
     print(f"[pre-fit] late_ancient_start_D=2*pi*L*density={late_ancient_start_D:.6e} deaths/yr")
@@ -731,10 +732,9 @@ def render() -> None:
     # Analytic flat ancient segment (included in plotting, excluded from fit).
     flat_yr = np.linspace(float(ancient_start), float(fit_ancient_start), N_GRID)
     flat_age = flat_yr - ancient_start
-    flat_D = 2.0 * np.pi * float(density_slider) * flat_age
+    flat_D = 2.0 * np.pi * density * flat_age
 
     # Dashed/reference density comes directly from the density slider.
-    ancient_density = float(density_slider)
 
     yr_model_fit = np.concatenate([pr["yr_arr"][1:] for pr in r["periods"]])
     D_model_fit = np.concatenate([pr["D_arr"][1:] for pr in r["periods"]])
@@ -786,16 +786,16 @@ def render() -> None:
         hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
     ))
 
-    # dashed reference: 2π · age · ancient_density
-    # when norm_circ is on (÷ 2π·age) this collapses to the constant ancient_density
+    # dashed reference: 2π · age · density
+    # when norm_circ is on (÷ 2π·age) this collapses to the constant density
     _owid_last_yr = float(_OWID_SERIES[-1][0])
     ref_yr  = np.linspace(float(ancient_start), _owid_last_yr, 8_000)
     ref_age = np.maximum(ref_yr - ancient_start, 1.0)
     if norm_circ:
         # main plot always normalises by 2π·age → reference collapses to constant
-        ref_y = np.full_like(ref_yr, ancient_density)
+        ref_y = np.full_like(ref_yr, density)
     else:
-        ref_y = 2.0 * np.pi * ref_age * ancient_density
+        ref_y = 2.0 * np.pi * ref_age * density
     ref_y = np.maximum(ref_y, 1e-6) if log_y else ref_y
     ref_x        = 2026.0 - ref_yr if log_x else ref_yr
     ref_hover_yr = [_yfmt(int(round(y))) for y in ref_yr]
@@ -803,7 +803,7 @@ def render() -> None:
         x=ref_x, y=ref_y,
         mode="lines",
         line=dict(color="black", width=1.5, dash="dash"),
-        name="2π · age · ancient_density",
+        name="2π · age · density",
         customdata=ref_hover_yr,
         hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
     ))
@@ -847,11 +847,11 @@ def render() -> None:
     with st.expander("Period cumulative inputs/derived deaths", expanded=False):
         st.dataframe(cm_deaths_rows, width="stretch")
 
-    # ── C = D / ancient_density ───────────────────────────────────────────────
-    # D = ancient_density · C · 1yr  →  C = D / ancient_density  (units: yr)
-    st.subheader("C = D / ancient_density  (yr)")
+    # ── C = D / density ───────────────────────────────────────────────────────
+    # D = density · C · 1yr  →  C = D / density  (units: yr)
+    st.subheader("C = D / density  (yr)")
     fig_c = go.Figure()
-    flat_C = flat_D / ancient_density
+    flat_C = flat_D / density
     fig_c.add_trace(go.Scatter(
         x=2026.0 - flat_yr if log_x else flat_yr,
         y=np.maximum(flat_C, 1e-30) if log_y else flat_C,
@@ -864,7 +864,7 @@ def render() -> None:
     for j, pr in enumerate(r["periods"]):
         label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
         yr    = pr["yr_arr"][1:]
-        C_arr = pr["D_arr"][1:] / ancient_density          # C = D / ancient_density
+        C_arr = pr["D_arr"][1:] / density          # C = D / density
         x_vals   = 2026.0 - yr if log_x else yr
         y_vals   = np.maximum(C_arr, 1e-30) if log_y else C_arr
         hover_yr = [_yfmt(int(round(y))) for y in yr]
@@ -878,7 +878,7 @@ def render() -> None:
         ))
 
     # OWID actual C trace (1950–2023)
-    _owid_C = _owid_D / ancient_density
+    _owid_C = _owid_D / density
     fig_c.add_trace(go.Scatter(
         x=2026.0 - _owid_yr if log_x else _owid_yr,
         y=np.maximum(_owid_C, 1e-30) if log_y else _owid_C,
@@ -906,7 +906,7 @@ def render() -> None:
     ))
 
     fig_c.update_layout(
-        title="C = D / ancient_density  vs  2π · age",
+        title="C = D / density  vs  2π · age",
         xaxis_title="Years before 2026 (log)" if log_x else "Year (−ve = BCE)",
         yaxis_title="C  (yr)",
         xaxis=dict(
@@ -920,7 +920,7 @@ def render() -> None:
     )
     st.plotly_chart(fig_c, width="stretch")
 
-    # ── f = C / 2π = D / (ancient_density · 2π) ──────────────────────────────
+    # ── f = C / 2π = D / (density · 2π) ──────────────────────────────────────
     from plotly.subplots import make_subplots
 
     # Build combined model + OWID series; OWID starts at 1951 (1950 already in model)
@@ -931,7 +931,7 @@ def render() -> None:
     yr_all = np.concatenate([yr_model, yr_owid_ext])
     D_all  = np.concatenate([D_model,  D_owid_ext])
 
-    f_all   = D_all / (ancient_density * 2.0 * np.pi)   # f = C/2π
+    f_all   = D_all / (density * 2.0 * np.pi)   # f = C/2π
 
     f1 = np.gradient(f_all, yr_all)
     f2 = np.gradient(f1,    yr_all)
@@ -962,7 +962,7 @@ def render() -> None:
 
     # f, f′, f″ subplots
     deriv_series = [
-        (f_all, "f",   "f = C / 2π  =  D / (2π · ancient_density)"),
+        (f_all, "f",   "f = C / 2π  =  D / (2π · density)"),
         (f1,    "f′",  "f′  (df/dyr)"),
         (f2,    "f″",  "f″  (d²f/dyr²)"),
     ]
