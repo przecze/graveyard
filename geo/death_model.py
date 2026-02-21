@@ -169,7 +169,6 @@ def fit_deaths_direct(
     D_start: float | None = None,
     D_end: float | None = None,
     x_mode: str = "log_before_2026",
-    mono_soft_slack_1200_1650: float = 0.0,
     cubic_1200_1650: bool = True,
     cubic_1900_1950: bool = False,
 ) -> dict:
@@ -205,9 +204,6 @@ def fit_deaths_direct(
     D_start   : if given, pin D = D_start at the first anchor year (consumes 1 DOF)
     D_end     : if given, pin D = D_end   at the last  anchor year (consumes 1 DOF)
     x_mode    : one of "log_before_2026", "year", "log_before_1950"
-    mono_soft_slack_1200_1650
-              : extra allowed monotonicity slack for the 1200→1650 period
-                only (same units as dD/du constraints). 0 = default behavior.
     cubic_1200_1650
               : if True and anchors include 1200→1650 as a single period,
                 add a u^3 term only in that period (adds one global DOF).
@@ -433,28 +429,22 @@ def fit_deaths_direct(
         # and positivity at each period endpoint.
         # For log modes mono_factor=+1: dD/du ≤ 0 (u decreasing → D rising).
         # For year mode mono_factor=−1: −dD/du ≤ 0 i.e. dD/du ≥ 0 (u increasing → D rising).
-        G_rows, h_rows, slack_rows = [], [], []
+        G_rows, h_rows = [], []
 
         for j in range(n):
-            period_slack = (
-                float(mono_soft_slack_1200_1650)
-                if anchor_years[j] == 1200 and anchor_years[j + 1] == 1650
-                else 0.0
-            )
             for u in (u_bnd[j], u_bnd[j + 1]):
                 g   = mono_factor * _dDdu_null_vec(j, u)
                 hv  = mono_factor * -float(_dDdu_theta(theta_p, j, u))
-                G_rows.append(g); h_rows.append(hv); slack_rows.append(period_slack)
+                G_rows.append(g); h_rows.append(hv)
 
         for j in range(n):
             for u in (u_bnd[j], u_bnd[j + 1]):
                 g   = -_D_null_vec(j, u)
                 hv  = float(_D_theta(theta_p, j, u))
-                G_rows.append(g); h_rows.append(hv); slack_rows.append(0.0)
+                G_rows.append(g); h_rows.append(hv)
 
-        G       = np.array(G_rows)
-        h       = np.array(h_rows)
-        h_slack = h + np.array(slack_rows)
+        G = np.array(G_rows)
+        h = np.array(h_rows)
 
         EPS_HARD = 1.0
         sol = minimize(
@@ -463,30 +453,30 @@ def fit_deaths_direct(
             jac=lambda x: 2.0 * x,
             method="SLSQP",
             constraints={"type": "ineq",
-                         "fun": lambda x: h_slack + EPS_HARD - G @ x,
+                         "fun": lambda x: h + EPS_HARD - G @ x,
                          "jac": lambda x: -G},
             options={"ftol": 1e-15, "maxiter": 2000},
         )
 
-        mono_ok = sol.success and np.all(G @ sol.x <= h_slack + MONO_TOL)
+        mono_ok = sol.success and np.all(G @ sol.x <= h + MONO_TOL)
         x_opt   = sol.x
 
         if not mono_ok:
             lam = 1e8
 
             def soft_obj(x: np.ndarray) -> float:
-                viol = np.maximum(0.0, G @ x - h_slack)
+                viol = np.maximum(0.0, G @ x - h)
                 return float(lam * np.dot(viol, viol) + np.dot(x, x))
 
             def soft_jac(x: np.ndarray) -> np.ndarray:
-                viol = np.maximum(0.0, G @ x - h_slack)
+                viol = np.maximum(0.0, G @ x - h)
                 return 2.0 * lam * (G.T @ viol) + 2.0 * x
 
             sol2  = minimize(soft_obj, np.zeros(null_dim), jac=soft_jac,
                              method="SLSQP",
                              options={"ftol": 1e-20, "maxiter": 5000})
             x_opt = sol2.x
-            viol  = np.maximum(0.0, G @ x_opt - h_slack)
+            viol  = np.maximum(0.0, G @ x_opt - h)
             mono_ok = bool(viol.max() <= MONO_TOL)
             if verbose:
                 print(f"Hard mono failed → soft penalty.  "
@@ -622,24 +612,21 @@ def render() -> None:
     yc             = ancient_length
     ancient_start  = -8000 - yc
 
-    density_window_years = st.slider(
-        "Ancient density window X (years)",
-        min_value=1_000,
-        max_value=min(6_000, yc),
-        value=min(1_000, yc),
+    ancient_flat_length = st.slider(
+        "Ancient 'flat' length",
+        min_value=1,
+        max_value=max(1, yc),
+        value=min(1_000, max(1, yc)),
         step=100,
-        help="Use only the first X years of the ancient era to compute ancient_density.",
+        help="Length of analytic pre-fit ancient segment to exclude from fitting.",
     )
-    mono_soft_slack_1200_1650 = st.slider(
-        "1200 -> 1650 monotonicity softness",
-        min_value=0.0,
-        max_value=20_000.0,
-        value=0.0,
-        step=100.0,
-        help=(
-            "Extra slack applied only to monotonicity constraints in the 1200 -> 1650 period. "
-            "Higher = softer penalty in that segment."
-        ),
+    density_slider = st.slider(
+        "Density (graves/year**2)",
+        min_value=1,
+        max_value=200,
+        value=60,
+        step=1,
+        help="Density used for analytic flat-ancient calculations.",
     )
     cubic_segment_option = st.radio(
         "Cubic-fit segment",
@@ -654,16 +641,49 @@ def render() -> None:
     cubic_1200_1650 = cubic_segment_option == "1200 -> 1650"
     cubic_1900_1950 = cubic_segment_option == "1900 -> 1950"
 
-    # Prepend the ancient anchor year with zero baseline population.
-    extended_data = {ancient_start: {"pop": 0, "cbr": 0}, **data}
+    # Flat ancient segment is analytic (not fitted), then fit starts at
+    # the post-flat ancient anchor and continues through the historical anchors.
+    flat_len_fit = min(max(1, int(ancient_flat_length)), yc - 1)
+    fit_ancient_start = ancient_start + flat_len_fit
+
+    row_minus_8000 = data[-8000]
+    if "cumulative_deaths_estimated" in row_minus_8000:
+        ancient_total_deaths = float(row_minus_8000["cumulative_deaths_estimated"])
+    elif "cumulative_births" in row_minus_8000:
+        ancient_total_deaths = float(row_minus_8000["cumulative_births"]) - float(row_minus_8000.get("pop", 0.0))
+    elif "cumulative" in row_minus_8000:
+        ancient_total_deaths = float(row_minus_8000["cumulative"])
+    else:
+        raise KeyError(
+            "Missing cumulative deaths source for year -8000. "
+            "Expected one of: cumulative_deaths_estimated, cumulative_births, cumulative."
+        )
+
+    flat_deaths = np.pi * (flat_len_fit ** 2) * float(density_slider)
+    late_ancient_deaths = ancient_total_deaths - flat_deaths
+    late_ancient_start_D = 2.0 * np.pi * flat_len_fit * float(density_slider)
+
+    print(f"[pre-fit] flat_len_years={flat_len_fit}")
+    print(f"[pre-fit] flat_density={float(density_slider):.6g} graves/yr^2")
+    print(f"[pre-fit] flat_deaths=pi*L^2*density={flat_deaths:.6e}")
+    print(f"[pre-fit] late_ancient_deaths=ancient_total-flat={late_ancient_deaths:.6e}")
+    print(f"[pre-fit] late_ancient_start_D=2*pi*L*density={late_ancient_start_D:.6e} deaths/yr")
+
+    extended_data = {
+        fit_ancient_start: {"pop": 0, "cbr": 0},
+        **data,
+    }
+    extended_data[-8000] = {
+        **extended_data[-8000],
+        "cumulative_deaths_estimated": late_ancient_deaths,
+    }
 
     with st.spinner("Fitting deaths/yr piecewise quadratic…"):
         r = fit_deaths_direct(
             data=extended_data,
-            D_start=0.0,
+            D_start=late_ancient_start_D,
             D_end=float(_OWID_DEATHS[1950]),
             x_mode=x_mode,
-            mono_soft_slack_1200_1650=mono_soft_slack_1200_1650,
             cubic_1200_1650=cubic_1200_1650,
             cubic_1900_1950=cubic_1900_1950,
         )
@@ -693,7 +713,8 @@ def render() -> None:
     st.caption(
         f"D_j(t) = a_j + b_j·u + c_j·u² ({cubic_desc}),  {_u_desc}.  "
         "C¹ continuity at period boundaries.  "
-        "D=0 pinned at start, D=OWID(1950) pinned at end.  "
+        "D is pinned at post-flat ancient start (from flat-density geometry), "
+        "and at OWID(1950) at the end.  "
         "Period constraints use cumulative_births and anchor populations."
     )
 
@@ -705,26 +726,34 @@ def render() -> None:
         log_x = st.toggle("Log X axis", value=False)
     with col_norm:
         norm_circ = st.toggle("Normalise D", value=False)
+    show_legend = st.toggle("Show legend", value=True)
 
-    # ancient_density from first X years of fitted ancient D:
-    # sum(first X yearly D values) / (π · X²)
-    ancient_pr = r["periods"][0]
-    ancient_yr = ancient_pr["yr_arr"]
-    ancient_D = ancient_pr["D_arr"]
-    x_years = density_window_years
-    x_end_year = ancient_start + x_years
-    x_mask = (ancient_yr >= ancient_start) & (ancient_yr < x_end_year)
-    D_first_x = ancient_D[x_mask]
-    if D_first_x.size == 0:
-        D_first_x = ancient_D[:1]
-        x_years = 1
-    ancient_density = D_first_x.sum() / (np.pi * (x_years ** 2))
+    # Analytic flat ancient segment (included in plotting, excluded from fit).
+    flat_yr = np.linspace(float(ancient_start), float(fit_ancient_start), N_GRID)
+    flat_age = flat_yr - ancient_start
+    flat_D = 2.0 * np.pi * float(density_slider) * flat_age
+
+    # Dashed/reference density comes directly from the density slider.
+    ancient_density = float(density_slider)
+
+    yr_model_fit = np.concatenate([pr["yr_arr"][1:] for pr in r["periods"]])
+    D_model_fit = np.concatenate([pr["D_arr"][1:] for pr in r["periods"]])
 
     # OWID extension arrays (1950 included for a seamless join with the model)
     _owid_yr = np.array([float(y) for y, _ in _OWID_SERIES])
     _owid_D  = np.array([float(d) for _, d in _OWID_SERIES])
 
     fig = go.Figure()
+    flat_plot = flat_D / (2.0 * np.pi * np.maximum(flat_age, 1.0)) if norm_circ else flat_D
+    fig.add_trace(go.Scatter(
+        x=2026.0 - flat_yr if log_x else flat_yr,
+        y=np.maximum(flat_plot, 1e-6) if log_y else flat_plot,
+        mode="lines",
+        line=dict(color="#222222", width=2.5),
+        name=f"{_yfmt(int(round(flat_yr[0])))} → {_yfmt(int(round(flat_yr[-1])))} (flat analytic)",
+        customdata=[_yfmt(int(round(y))) for y in flat_yr],
+        hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
+    ))
     for j, pr in enumerate(r["periods"]):
         label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
         yr    = pr["yr_arr"][1:]                      # drop shared/pinned first point
@@ -794,6 +823,7 @@ def render() -> None:
         ) if (not log_x and not log_y) else dict(
             x=1.0, y=0.0, xanchor="right", yanchor="bottom",
         ),
+        showlegend=show_legend,
         margin=dict(t=40),
     )
     st.plotly_chart(fig, width="stretch")
@@ -817,16 +847,20 @@ def render() -> None:
     with st.expander("Period cumulative inputs/derived deaths", expanded=False):
         st.dataframe(cm_deaths_rows, width="stretch")
 
-    st.metric(
-        "ancient_density  (deaths / yr²)",
-        f"{ancient_density:,.1f}",
-        help=f"Computed from first {x_years:,} years of ancient D, divided by π·X².",
-    )
-
     # ── C = D / ancient_density ───────────────────────────────────────────────
     # D = ancient_density · C · 1yr  →  C = D / ancient_density  (units: yr)
     st.subheader("C = D / ancient_density  (yr)")
     fig_c = go.Figure()
+    flat_C = flat_D / ancient_density
+    fig_c.add_trace(go.Scatter(
+        x=2026.0 - flat_yr if log_x else flat_yr,
+        y=np.maximum(flat_C, 1e-30) if log_y else flat_C,
+        mode="lines",
+        line=dict(color="#222222", width=2.5),
+        name=f"{_yfmt(int(round(flat_yr[0])))} → {_yfmt(int(round(flat_yr[-1])))} (flat analytic)",
+        customdata=[_yfmt(int(round(y))) for y in flat_yr],
+        hovertemplate="%{customdata}  —  %{y:,.4g}<extra></extra>",
+    ))
     for j, pr in enumerate(r["periods"]):
         label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
         yr    = pr["yr_arr"][1:]
@@ -881,6 +915,7 @@ def render() -> None:
         ),
         yaxis_type="log" if log_y else "linear",
         legend=dict(x=0.01, y=0.99, xanchor="left", yanchor="top"),
+        showlegend=show_legend,
         margin=dict(t=40),
     )
     st.plotly_chart(fig_c, width="stretch")
@@ -889,8 +924,8 @@ def render() -> None:
     from plotly.subplots import make_subplots
 
     # Build combined model + OWID series; OWID starts at 1951 (1950 already in model)
-    yr_model = np.concatenate([pr["yr_arr"][1:] for pr in r["periods"]])
-    D_model  = np.concatenate([pr["D_arr"][1:]  for pr in r["periods"]])
+    yr_model = np.concatenate([flat_yr, yr_model_fit])
+    D_model  = np.concatenate([flat_D, D_model_fit])
     yr_owid_ext = np.array([float(y) for y, _ in _OWID_SERIES if y > 1950])
     D_owid_ext  = np.array([float(d) for y, d in _OWID_SERIES if y > 1950])
     yr_all = np.concatenate([yr_model, yr_owid_ext])
@@ -905,8 +940,12 @@ def render() -> None:
 
     # NaN-out ±1 window at model period boundaries to suppress gradient spikes
     # (the model-OWID join at 1950 is a natural data boundary, not NaN'd)
-    period_size  = N_GRID - 1
-    boundary_idx = [k * period_size for k in range(1, n)]
+    seg_lengths = [len(flat_yr)] + [len(pr["yr_arr"][1:]) for pr in r["periods"]]
+    boundary_idx = []
+    _acc = 0
+    for _seg_len in seg_lengths[:-1]:
+        _acc += _seg_len
+        boundary_idx.append(_acc)
     nan_mask = np.zeros(len(yr_all), dtype=bool)
     for bi in boundary_idx:
         nan_mask[max(0, bi - 1) : min(len(yr_all), bi + 2)] = True
@@ -946,7 +985,7 @@ def render() -> None:
         fig_f.update_yaxes(title_text=ytitle, row=row, col=1)
 
     fig_f.update_xaxes(**xaxis_cfg)
-    fig_f.update_layout(title="f, f′, f″", height=700, margin=dict(t=50))
+    fig_f.update_layout(title="f, f′, f″", height=700, showlegend=show_legend, margin=dict(t=50))
     st.plotly_chart(fig_f, width="stretch")
 
     # −f″/f′  (curvature)
@@ -958,7 +997,7 @@ def render() -> None:
     ))
     fig_k.update_xaxes(**xaxis_cfg)
     fig_k.update_yaxes(title_text="−f″/f′")
-    fig_k.update_layout(title="Curvature K = −f″/f′", height=350, margin=dict(t=50))
+    fig_k.update_layout(title="Curvature K = −f″/f′", height=350, showlegend=show_legend, margin=dict(t=50))
     st.plotly_chart(fig_k, width="stretch")
 
     st.stop()
