@@ -4,8 +4,6 @@ import death_model
 import geo
 import view_port
 
-st.title("hello geo")
-
 page = st.sidebar.radio("Page", ["Death Rate Model", "Geometry", "Port"])
 
 if page == "Death Rate Model":
