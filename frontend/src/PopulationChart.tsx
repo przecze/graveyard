@@ -553,7 +553,7 @@ interface Props {
 export default function PopulationChart({ yc, onYcChange }: Props) {
   const [showCurvature, setShowCurvature] = useState(true);
   // kappaYc = k·yc (dimensionless curvature scale), k = √|K| where K < 0
-  const [kappaYc, setKappaYc] = useState(0);
+  const [kappaYc, setKappaYc] = useState(3.95);
   const clampedKappaYc = Math.min(kappaYc, yc / 500);
   const k = clampedKappaYc / Math.max(1, yc);
   const [walkMinutes, setWalkMinutes] = useState(30);
@@ -604,6 +604,8 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
         Area(yc, κ) = {hypDiskArea(yc, k).toExponential(3)} yr²
         &nbsp;&middot;&nbsp;
         density = {(ANCIENT_GRAVES / hypDiskArea(yc, k)).toFixed(4)}/yr²
+        &nbsp;&middot;&nbsp;
+        C(yc) = {Math.round(hypCircumference(yc, k)).toLocaleString()} yr
         {clampedKappaYc > 0 && (
           <span style={{ color: '#ff8c42' }}>
             &nbsp;&middot;&nbsp;
@@ -711,6 +713,31 @@ export default function PopulationChart({ yc, onYcChange }: Props) {
         useResizeHandler
         style={{ width: '100%' }}
       />
+
+      {/* Anchor values: ancient edge + OWID 1950 */}
+      {(() => {
+        const density    = ANCIENT_GRAVES / hypDiskArea(yc, k);
+        const edgeDeaths = density * hypCircumference(yc, k);
+        const owid1950   = deathsOwid[0][1];   // first OWID entry is 1950
+        const stat: React.CSSProperties = {
+          display: 'flex', flexDirection: 'column', gap: 2,
+          padding: '8px 14px', borderRadius: 6, background: '#161616',
+        };
+        const label: React.CSSProperties = { fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.05em' };
+        const value: React.CSSProperties = { fontSize: 15, fontWeight: 700 };
+        return (
+          <div style={{ display: 'flex', gap: 10, marginTop: 8, marginBottom: 4 }}>
+            <div style={stat}>
+              <span style={label}>deaths / yr — ancient edge (ρ · C(y&#x2C)))</span>
+              <span style={{ ...value, color: '#e06c75' }}>{fmtPop(edgeDeaths)}</span>
+            </div>
+            <div style={stat}>
+              <span style={label}>deaths / yr — 1950 (OWID)</span>
+              <span style={{ ...value, color: '#98c379' }}>{fmtPop(owid1950)}</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* PRB 2022 era table */}
       <details style={{ marginTop: 12 }}>

@@ -280,7 +280,7 @@ function BoundaryList({ label, items }: { label: string; items: BoundaryNeighbor
 export default function App() {
   const [periodLength, setPeriodLength] = useState(75);
   const [maxGraves, setMaxGraves] = useState(100000);
-  const [ancientCircleRadius, setAncientCircleRadius] = useState(20000);
+  const [ancientCircleRadius, setAncientCircleRadius] = useState(6000);
   const [selectedPeriod, setSelectedPeriod] = useState(50);
   const [selectedChunk, setSelectedChunk] = useState(0);
 
