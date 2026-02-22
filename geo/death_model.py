@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["numpy", "scipy"]
+# dependencies = ["numpy", "scipy", "plotly"]
 # ///
 """
 Deaths/yr model — piecewise polynomial (cubic / quartic).
@@ -25,7 +25,7 @@ population carry-over:
 
     cumulative_deaths[j] = cumulative_births[end_j] - pop[end_j] + pop[start_j]
 
-with a special-case baseline pop[start_j] = 0 when end_j is -8000.
+with a special-case baseline pop[start_j] = 0 when end_j is -8_000.
 
 Always run this module via `uv run`.
 Standalone : uv run death_model.py [path/to/data.json] [--verbose]
@@ -34,6 +34,7 @@ Streamlit  : import death_model; death_model.render()
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -45,8 +46,10 @@ from scipy.optimize import minimize
 _DOCKER_PATH = Path("/data/data.json")
 _LOCAL_PATH  = Path(__file__).parent.parent / "frontend" / "src" / "data.json"
 
-N_GRID = 4_001    # output grid points per period
-N_FINE = 40_001   # fine grid for moment integrals and cumulative check
+IS_MAIN = __name__ == "__main__"
+if not IS_MAIN:
+    import streamlit as st
+
 
 # ── x-variable modes ───────────────────────────────────────────────────────────
 
@@ -141,7 +144,7 @@ def _period_cumulative_deaths(data: dict, anchor_years: list[int]) -> np.ndarray
     for j in range(n):
         start_year = anchor_years[j]
         end_row = data[anchor_years[j + 1]]
-        pop_start = 0.0 if anchor_years[j + 1] == -8000 else float(data[start_year].get("pop", 0.0))
+        pop_start = 0.0 if anchor_years[j + 1] == -8_000 else float(data[start_year].get("pop", 0.0))
         deaths_tgt[j] = float(end_row["cumulative_births"]) - float(end_row.get("pop", 0.0)) + pop_start
     return deaths_tgt
 
@@ -182,7 +185,7 @@ def fit_deaths_direct(
     T_cumul = np.array([float(y - t0) for y in anchor_years])
     T_periods = np.diff(T_cumul)
     deaths_tgt = _period_cumulative_deaths(data, anchor_years)
-    _anc_yr = np.array(anchor_years, dtype=float)
+    _anc_yr = np.array(anchor_years)
     u_bnd = _u_from_year(_anc_yr, x_mode, K_ref)
 
     is_log_mode = x_mode != "year"
@@ -207,11 +210,12 @@ def fit_deaths_direct(
     max_deg = int(period_degree.max())
     IU = np.zeros((n, max_deg + 1))
     for j in range(n):
-        t_arr = np.linspace(T_cumul[j], T_cumul[j + 1], N_FINE)
-        u_arr = _u_from_year(t_arr + t0, x_mode, K_ref)
+        yr_j  = np.arange(anchor_years[j], anchor_years[j + 1] + 1)
+        t_j   = yr_j - t0
+        u_j   = _u_from_year(yr_j, x_mode, K_ref)
         IU[j, 0] = T_periods[j]
         for k in range(1, int(period_degree[j]) + 1):
-            IU[j, k] = np.trapezoid(u_arr ** k, t_arr)
+            IU[j, k] = np.trapezoid(u_j ** k, t_j)
 
     n_extra = (
         (1 if D_start is not None else 0)
@@ -338,57 +342,83 @@ def fit_deaths_direct(
     def _dDdu_theta(tv, j, u):
         return _poly_eval(tv, j, u, 1)
 
-    MONO_TOL = 1000.0
-    MONO_PTS = 17
+    MONO_TOL = 1_000.0
+
+    def _u_j(j: int) -> np.ndarray:
+        return _u_from_year(np.arange(anchor_years[j], anchor_years[j + 1] + 1), x_mode, K_ref)
+
+    def _basis_matrix(u_arr: np.ndarray, degree: int, order: int) -> np.ndarray:
+        """Return (len(u_arr), degree+1) basis matrix for given derivative order."""
+        P = len(u_arr)
+        B = np.zeros((P, degree + 1))
+        for k in range(order, degree + 1):
+            f = 1.0
+            for p in range(order):
+                f *= k - p
+            B[:, k] = f * (u_arr ** (k - order))
+        return B
 
     if null_dim == 0:
         theta = theta_p
-        mono_ok = True
-        for j in range(n):
-            ulo, uhi = sorted([float(u_bnd[j]), float(u_bnd[j + 1])])
-            for u in np.linspace(ulo, uhi, MONO_PTS):
-                if mono_factor * float(_dDdu_theta(theta, j, u)) > MONO_TOL:
-                    mono_ok = False
+        mono_ok = all(
+            not np.any(mono_factor * _dDdu_theta(theta, j, _u_j(j)) > MONO_TOL)
+            for j in range(n)
+        )
     else:
-        G_rows, h_rows = [], []
+        # Build constraint matrices from integer years.
+        # Degree-3/4 polynomials need only ~30 pts/period to bound monotonicity for
+        # the optimizer; stride long periods so G rows stay tractable.
+        MAX_OPT_PTS = 50
+        G_blocks, h_blocks = [], []
+        G_full_blocks, h_full_blocks = [], []
         for j in range(n):
-            ulo, uhi = sorted([float(u_bnd[j]), float(u_bnd[j + 1])])
-            for u in np.linspace(ulo, uhi, MONO_PTS):
-                nv = N_mat[_sl(j), :].T @ _basis_u(u, int(period_degree[j]), 1)
-                G_rows.append(mono_factor * nv)
-                h_rows.append(mono_factor * -float(_dDdu_theta(theta_p, j, u)))
+            u_full = _u_j(j)
+            stride = max(1, len(u_full) // MAX_OPT_PTS)
+            u_opt = u_full[::stride]
+            deg = int(period_degree[j])
+            B1_opt  = _basis_matrix(u_opt,  deg, 1)
+            B1_full = _basis_matrix(u_full, deg, 1)
+            G_blocks.append(mono_factor * (B1_opt  @ N_mat[_sl(j), :]))
+            h_blocks.append(mono_factor * -_dDdu_theta(theta_p, j, u_opt))
+            G_full_blocks.append(mono_factor * (B1_full @ N_mat[_sl(j), :]))
+            h_full_blocks.append(mono_factor * -_dDdu_theta(theta_p, j, u_full))
         for j in range(n):
-            ulo, uhi = sorted([float(u_bnd[j]), float(u_bnd[j + 1])])
-            for u in np.linspace(ulo, uhi, MONO_PTS):
-                nv = N_mat[_sl(j), :].T @ _basis_u(u, int(period_degree[j]), 0)
-                G_rows.append(-nv)
-                h_rows.append(float(_D_theta(theta_p, j, u)))
-        G, h = np.array(G_rows), np.array(h_rows)
+            u_full = _u_j(j)
+            stride = max(1, len(u_full) // MAX_OPT_PTS)
+            u_opt = u_full[::stride]
+            deg = int(period_degree[j])
+            B0_opt  = _basis_matrix(u_opt,  deg, 0)
+            B0_full = _basis_matrix(u_full, deg, 0)
+            G_blocks.append(-(B0_opt  @ N_mat[_sl(j), :]))
+            h_blocks.append(_D_theta(theta_p, j, u_opt))
+            G_full_blocks.append(-(B0_full @ N_mat[_sl(j), :]))
+            h_full_blocks.append(_D_theta(theta_p, j, u_full))
+        G_opt,  h_opt  = np.vstack(G_blocks),      np.concatenate(h_blocks)
+        G_full, h_full = np.vstack(G_full_blocks),  np.concatenate(h_full_blocks)
+
         sol = minimize(lambda x: float(x @ x), np.zeros(null_dim), jac=lambda x: 2.0 * x,
                        method="SLSQP",
-                       constraints={"type": "ineq", "fun": lambda x: h + 1.0 - G @ x, "jac": lambda x: -G},
-                       options={"ftol": 1e-15, "maxiter": 3000})
-        mono_ok = sol.success and np.all(G @ sol.x <= h + MONO_TOL)
+                       constraints={"type": "ineq", "fun": lambda x: h_opt + 1.0 - G_opt @ x, "jac": lambda x: -G_opt},
+                       options={"ftol": 1e-15, "maxiter": 3_000})
         x_opt = sol.x
+        mono_ok = sol.success and np.all(G_full @ sol.x <= h_full + MONO_TOL)
         if not mono_ok:
             lam = 1e8
             sol2 = minimize(
-                lambda x: float(lam * np.sum(np.maximum(0.0, G @ x - h) ** 2) + x @ x),
-                np.zeros(null_dim), method="SLSQP", options={"ftol": 1e-20, "maxiter": 5000})
+                lambda x: float(lam * np.sum(np.maximum(0.0, G_opt @ x - h_opt) ** 2) + x @ x),
+                np.zeros(null_dim), method="SLSQP", options={"ftol": 1e-20, "maxiter": 5_000})
             x_opt = sol2.x
-            mono_ok = bool(np.maximum(0.0, G @ x_opt - h).max() <= MONO_TOL)
+            mono_ok = bool(np.maximum(0.0, G_full @ x_opt - h_full).max() <= MONO_TOL)
         theta = theta_p + N_mat @ x_opt
 
     periods = []
     deaths_model = np.zeros(n)
     for j in range(n):
-        t_arr = np.linspace(T_cumul[j], T_cumul[j + 1], N_GRID)
-        u_arr = _u_from_year(t_arr + t0, x_mode, K_ref)
-        D_arr = np.maximum(0.0, _D_theta(theta, j, u_arr))
-        t_fine = np.linspace(T_cumul[j], T_cumul[j + 1], N_FINE)
-        u_fine = _u_from_year(t_fine + t0, x_mode, K_ref)
-        deaths_model[j] = np.trapezoid(_D_theta(theta, j, u_fine), t_fine)
-        periods.append({"t_arr": t_arr, "yr_arr": t_arr + t0, "u_arr": u_arr, "D_arr": D_arr})
+        yr_arr = np.arange(anchor_years[j], anchor_years[j + 1] + 1, dtype=int)
+        u_arr    = _u_from_year(yr_arr, x_mode, K_ref)
+        D_arr    = np.maximum(0.0, _D_theta(theta, j, u_arr))
+        deaths_model[j] = np.trapezoid(_D_theta(theta, j, u_arr), yr_arr)
+        periods.append({"yr_arr": yr_arr, "u_arr": u_arr, "D_arr": D_arr})
 
     return dict(
         periods=periods,
@@ -416,17 +446,84 @@ _COLOURS = [
 ]
 
 
-# ── Streamlit render ───────────────────────────────────────────────────────────
+# ── UI: standalone (stdout/defaults) vs Streamlit ───────────────────────────────
 
-def render() -> None:
+class _Ctx:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+def write(x):
+    if IS_MAIN: print(x); return
+    st.write(x)
+
+def subheader(text):
+    if IS_MAIN: print(text); return
+    st.subheader(text)
+
+def sidebar_radio(label, options, format_func=None, help=""):
+    if IS_MAIN: return options[0]
+    return st.sidebar.radio(label, options=options, format_func=format_func, help=help)
+
+def sidebar_slider(label, *, min_value, max_value, value, step=None, help=""):
+    if IS_MAIN: return value
+    return st.sidebar.slider(label, min_value=min_value, max_value=max_value, value=value, step=step, help=help)
+
+def spinner(msg):
+    if IS_MAIN: return contextlib.nullcontext()
+    return st.spinner(msg)
+
+def warning(msg):
+    if IS_MAIN: print(f"[warning] {msg}"); return
+    st.warning(msg)
+
+def columns(n):
+    if IS_MAIN: return tuple(_Ctx() for _ in range(n))
+    return st.columns(n)
+
+def toggle(label, *, value=False):
+    if IS_MAIN: return value
+    return st.toggle(label, value=value)
+
+def tabs(labels):
+    if IS_MAIN: return tuple(_Ctx() for _ in range(len(labels)))
+    return st.tabs(labels)
+
+def plotly_chart(fig, width="stretch"):
+    if IS_MAIN: return
+    st.plotly_chart(fig, width=width)
+
+def expander(title, *, expanded=False):
+    if IS_MAIN: return contextlib.nullcontext()
+    return st.expander(title, expanded=expanded)
+
+def metric(label, value):
+    if IS_MAIN: print(f"{label}: {value}"); return
+    st.metric(label, value)
+
+def dataframe(df, width="stretch"):
+    if IS_MAIN:
+        if df:
+            for row in df:
+                print(row)
+        return
+    st.dataframe(df, width=width)
+
+
+# ── Render (single computation flow) ────────────────────────────────────────────
+
+def render(
+    *,
+    data_path: Path | str | None = None,
+    verbose: bool = False,
+) -> None:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
-    import streamlit as st
 
-    data_path = _DOCKER_PATH if _DOCKER_PATH.exists() else _LOCAL_PATH
+    if data_path is None:
+        data_path = _DOCKER_PATH if _DOCKER_PATH.exists() else _LOCAL_PATH
 
     # ── x-variable mode ───────────────────────────────────────────────────────
-    x_mode = st.sidebar.radio(
+    x_mode = sidebar_radio(
         "X-variable (fitting basis)",
         options=list(_X_MODE_LABELS),
         format_func=_X_MODE_LABELS.__getitem__,
@@ -437,19 +534,19 @@ def render() -> None:
     )
 
     # ── ancient period slider ─────────────────────────────────────────────────
-    ancient_length = st.sidebar.slider(
+    ancient_length = sidebar_slider(
         "Ancient period length (years)",
         min_value=1_000,
         max_value=20_000,
         value=6_000,
         step=500,
-        help="Duration of the pre-history period prepended before the first data anchor (-8000).",
+        help="Duration of the pre-history period prepended before the first data anchor (-8_000).",
     )
     data, _ = _load_data(data_path)
     yc             = ancient_length
-    ancient_start  = -8000 - yc
+    ancient_start  = -8_000 - yc
 
-    ancient_flat_length = st.sidebar.slider(
+    ancient_flat_length = sidebar_slider(
         "Ancient 'flat' length",
         min_value=1,
         max_value=max(1, yc),
@@ -457,7 +554,7 @@ def render() -> None:
         step=100,
         help="Length of analytic pre-fit ancient segment to exclude from fitting.",
     )
-    density_slider = st.sidebar.slider(
+    density_slider = sidebar_slider(
         "Density (graves/year**2)",
         min_value=1,
         max_value=200,
@@ -466,7 +563,7 @@ def render() -> None:
         help="Density used for analytic flat-ancient calculations.",
     )
     density = float(density_slider)
-    owid_smooth_window = st.sidebar.slider(
+    owid_smooth_window = sidebar_slider(
         "OWID smoothing window (years)",
         min_value=0,
         max_value=50,
@@ -480,7 +577,7 @@ def render() -> None:
     flat_len_fit = min(max(1, int(ancient_flat_length)), yc - 1)
     fit_ancient_start = ancient_start + flat_len_fit
 
-    row_minus_8000 = data[-8000]
+    row_minus_8000 = data[-8_000]
     if "cumulative_deaths_estimated" in row_minus_8000:
         ancient_total_deaths = float(row_minus_8000["cumulative_deaths_estimated"])
     elif "cumulative_births" in row_minus_8000:
@@ -489,7 +586,7 @@ def render() -> None:
         ancient_total_deaths = float(row_minus_8000["cumulative"])
     else:
         raise KeyError(
-            "Missing cumulative deaths source for year -8000. "
+            "Missing cumulative deaths source for year -8_000. "
             "Expected one of: cumulative_deaths_estimated, cumulative_births, cumulative."
         )
 
@@ -510,12 +607,12 @@ def render() -> None:
         fit_ancient_start: {"pop": 0, "cbr": 0},
         **data,
     }
-    extended_data[-8000] = {
-        **extended_data[-8000],
+    extended_data[-8_000] = {
+        **extended_data[-8_000],
         "cumulative_deaths_estimated": late_ancient_deaths,
     }
 
-    with st.spinner("Fitting deaths/yr piecewise polynomial…"):
+    with spinner("Fitting deaths/yr piecewise polynomial…"):
         r = fit_deaths_direct(
             data=extended_data,
             D_start=late_ancient_start_D,
@@ -525,29 +622,30 @@ def render() -> None:
             dDdy_end=dDdy_end,
             d2Ddy2_end=d2Ddy2_end,
             x_mode=x_mode,
+            verbose=verbose,
         )
 
     anchor_years = r["anchor_years"]
     n            = r["n"]
 
     if not r["mono_ok"]:
-        st.warning(
+        warning(
             "Hard monotonicity constraint infeasible for this dataset — "
             "soft-penalty solution used; deaths/yr may not be strictly non-decreasing."
         )
 
-    st.subheader("Deaths / yr — piecewise polynomial")
+    subheader("Deaths / yr — piecewise polynomial")
 
     # ── deaths/yr curve ───────────────────────────────────────────────────────
-    col_logy, col_logx = st.columns(2)
+    col_logy, col_logx = columns(2)
     with col_logy:
-        log_y = st.toggle("Log Y axis", value=False)
+        log_y = toggle("Log Y axis", value=False)
     with col_logx:
-        log_x = st.toggle("Log X axis", value=False)
-    show_legend = st.toggle("Show legend", value=True)
+        log_x = toggle("Log X axis", value=False)
+    show_legend = toggle("Show legend", value=True)
 
     # Analytic flat ancient segment (included in plotting, excluded from fit).
-    flat_yr = np.linspace(float(ancient_start), float(fit_ancient_start), N_GRID)
+    flat_yr = np.arange(ancient_start, fit_ancient_start + 1)
     flat_age = flat_yr - ancient_start
     flat_D = 2.0 * np.pi * density * flat_age
 
@@ -573,11 +671,11 @@ def render() -> None:
     yr_all = np.concatenate([yr_model, yr_owid_ext])
     D_all  = np.concatenate([D_model,  D_owid_ext])
 
-    _owid_last_yr = float(_OWID_SERIES[-1][0])
-    ref_yr  = np.linspace(float(ancient_start), _owid_last_yr, 8_000)
+    _owid_last_yr = _OWID_SERIES[-1][0]
+    ref_yr  = np.arange(ancient_start, _owid_last_yr + 1)
     ref_age = np.maximum(ref_yr - ancient_start, 1.0)
     ref_2pi_age = 2.0 * np.pi * ref_age
-    ref_hover_yr = [_yfmt(int(round(y))) for y in ref_yr]
+    ref_hover_yr = [_yfmt(y) for y in ref_yr]
 
     def _hex_to_rgba(hex_colour: str, alpha: float) -> str:
         h = hex_colour.lstrip("#")
@@ -595,8 +693,8 @@ def render() -> None:
         i0 = int(np.ceil(y0))
         i1 = int(np.floor(y1))
         if i1 < i0:
-            return np.array([], dtype=float), np.array([], dtype=float)
-        yr_int = np.arange(i0, i1 + 1, dtype=float)
+            return np.array([], dtype=int), np.array([], dtype=float)
+        yr_int = np.arange(i0, i1 + 1)
         val_int = np.interp(yr_int, years, values)
         return yr_int, val_int
 
@@ -613,7 +711,7 @@ def render() -> None:
         y = np.interp(x, years, values)
         return float(np.trapezoid(y, x))
 
-    tab_rate, tab_cumul = st.tabs(["deaths/yr", "cumulative deaths"])
+    tab_rate, tab_cumul = tabs(["deaths/yr", "cumulative deaths"])
 
     with tab_rate:
         fig = go.Figure()
@@ -693,10 +791,10 @@ def render() -> None:
             showlegend=show_legend,
             margin=dict(t=40),
         )
-        st.plotly_chart(fig, width="stretch")
+        plotly_chart(fig, width="stretch")
 
-        with st.expander("Deaths/yr numeric derivatives", expanded=False):
-            yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1, dtype=float)
+        with expander("Deaths/yr numeric derivatives", expanded=False):
+            yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1)
             D_all_plot = np.interp(yr_all_plot, yr_all, D_all)
             for idx, yr in enumerate(yr_all_plot):
                 if yr > 1950 and int(yr) in _owid_sm:
@@ -767,10 +865,10 @@ def render() -> None:
                 ),
                 margin=dict(t=50),
             )
-            st.plotly_chart(fig_deriv, width="stretch")
+            plotly_chart(fig_deriv, width="stretch")
 
     with tab_cumul:
-        yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1, dtype=float)
+        yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1)
         D_all_plot = np.interp(yr_all_plot, yr_all, D_all)
         for idx, yr in enumerate(yr_all_plot):
             if yr > 1950 and int(yr) in _owid_sm:
@@ -787,7 +885,7 @@ def render() -> None:
             row = data[year]
             cm_births = float(row.get("cumulative_births", 0.0))
             pop = float(row.get("pop", 0.0))
-            pop_before = 0.0 if year == -8000 else float(data[prb_years_sorted[idx - 1]].get("pop", 0.0))
+            pop_before = 0.0 if year == -8_000 else float(data[prb_years_sorted[idx - 1]].get("pop", 0.0))
             prb_cm_deaths.append(cm_births - pop + pop_before)
         prb_cumul = np.cumsum(np.array(prb_cm_deaths, dtype=float))
         prb_x = 2026.0 - np.array(prb_years_sorted, dtype=float) if log_x else np.array(prb_years_sorted, dtype=float)
@@ -890,7 +988,7 @@ def render() -> None:
             showlegend=show_legend,
             margin=dict(t=40),
         )
-        st.plotly_chart(fig_cumul, width="stretch")
+        plotly_chart(fig_cumul, width="stretch")
 
     years_sorted = sorted(data.keys())
     cm_deaths_rows = []
@@ -898,7 +996,7 @@ def render() -> None:
         row = data[year]
         cm_births = float(row.get("cumulative_births", 0.0))
         pop = float(row.get("pop", 0.0))
-        pop_before = 0.0 if year == -8000 else float(data[years_sorted[idx - 1]].get("pop", 0.0))
+        pop_before = 0.0 if year == -8_000 else float(data[years_sorted[idx - 1]].get("pop", 0.0))
         cm_deaths = cm_births - pop + pop_before
         period_start = float(ancient_start) if idx == 0 else float(years_sorted[idx - 1])
         period_end = float(year)
@@ -924,21 +1022,21 @@ def render() -> None:
             )
         )
     )
-    st.metric(
+    metric(
         "Fit quality (sum |reconstructed per-period death diff|)",
         f"{fit_quality:.6e}",
     )
 
-    with st.expander("Period cumulative inputs/derived deaths", expanded=False):
+    with expander("Period cumulative inputs/derived deaths", expanded=False):
         transposed_rows = []
         if cm_deaths_rows:
             metric_keys = [k for k in cm_deaths_rows[0].keys() if k not in ("period", "year")]
-            for metric in metric_keys:
-                row_out = {"metric": metric}
+            for key in metric_keys:
+                row_out = {"metric": key}
                 for row in cm_deaths_rows:
-                    row_out[row["period"]] = row[metric]
+                    row_out[row["period"]] = row[key]
                 transposed_rows.append(row_out)
-        st.dataframe(transposed_rows, width="stretch")
+        dataframe(transposed_rows, width="stretch")
 
     # ── C = D / density ───────────────────────────────────────────────────────
     # D = density · C · 1yr  →  C = D / density  (units: yr)
@@ -992,7 +1090,7 @@ def render() -> None:
     ))
 
     # dashed reference: C_ref = 2π · age
-    ref_yr    = np.linspace(float(ancient_start), _owid_last_yr, 8_000)
+    ref_yr    = np.arange(ancient_start, _owid_last_yr + 1)
     ref_age   = np.maximum(ref_yr - ancient_start, 1.0)
     ref_C     = 2.0 * np.pi * ref_age
     ref_x     = 2026.0 - ref_yr if log_x else ref_yr
@@ -1020,11 +1118,11 @@ def render() -> None:
         showlegend=show_legend,
         margin=dict(t=40),
     )
-    st.plotly_chart(fig_c, width="stretch")
+    plotly_chart(fig_c, width="stretch")
 
     # ── f = C / 2π = D / (density · 2π) ──────────────────────────────────────
 
-    yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1, dtype=float)
+    yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1)
     D_all_plot = np.interp(yr_all_plot, yr_all, D_all)
     for idx, yr in enumerate(yr_all_plot):
         if yr > 1950 and int(yr) in _owid_sm:
@@ -1071,7 +1169,7 @@ def render() -> None:
 
     fig_f.update_xaxes(**xaxis_cfg)
     fig_f.update_layout(title="f, f′, f″", height=700, showlegend=show_legend, margin=dict(t=50))
-    st.plotly_chart(fig_f, width="stretch")
+    plotly_chart(fig_f, width="stretch")
 
     # −f″/f′  (curvature)
     fig_k = go.Figure(go.Scatter(
@@ -1083,58 +1181,14 @@ def render() -> None:
     fig_k.update_xaxes(**xaxis_cfg)
     fig_k.update_yaxes(title_text="−f″/f")
     fig_k.update_layout(title="Curvature K = −f″/f", height=350, showlegend=show_legend, margin=dict(t=50))
-    st.plotly_chart(fig_k, width="stretch")
+    plotly_chart(fig_k, width="stretch")
 
 
-# ── CLI entry point ────────────────────────────────────────────────────────────
+# ── CLI entry point (single computation flow via render) ───────────────────────
 
 if __name__ == "__main__":
     args      = sys.argv[1:]
     verbose   = "--verbose" in args
     path_args = [a for a in args if not a.startswith("--")]
     path      = Path(path_args[0]) if path_args else None
-    _yc_default = 6_000
-    _data, _    = _load_data(path)
-    _ancient_start = -8000 - _yc_default
-    _extended_data = {_ancient_start: {"pop": 0, "cbr": 0}, **_data}
-    _D_end_val, _dDdy_end, _d2Ddy2_end = _owid_endpoint_constraints(window=5)
-
-    r = fit_deaths_direct(
-        data=_extended_data,
-        verbose=verbose,
-        D_start=0.0,
-        D_end=_D_end_val,
-        dDdy_start=0.0,
-        d2Ddy2_start=0.0,
-        dDdy_end=_dDdy_end,
-        d2Ddy2_end=_d2Ddy2_end,
-    )
-
-    _years = np.array(sorted(r["anchor_years"]), dtype=float)
-    _cm_deaths = _period_cumulative_deaths(_extended_data, sorted(r["anchor_years"]))
-    _yr_model = np.concatenate(
-        [r["periods"][0]["yr_arr"]] + [pr["yr_arr"][1:] for pr in r["periods"][1:]]
-    )
-    _D_model = np.concatenate(
-        [r["periods"][0]["D_arr"]] + [pr["D_arr"][1:] for pr in r["periods"][1:]]
-    )
-
-    def _period_integral(years: np.ndarray, values: np.ndarray, y0: float, y1: float) -> float:
-        if y1 <= y0:
-            return 0.0
-        mid = years[(years > y0) & (years < y1)]
-        x = np.concatenate(([y0], mid, [y1]))
-        y = np.interp(x, years, values)
-        return float(np.trapezoid(y, x))
-
-    print(f"\n[reconstructed diffs]")
-    print(f"{'Period':<30} {'d_cm_deaths':>16}")
-    fit_quality = 0.0
-    for j in range(len(_years) - 1):
-        y0 = float(_years[j])
-        y1 = float(_years[j + 1])
-        recon = _period_integral(_yr_model, _D_model, y0, y1)
-        dcm = recon - float(_cm_deaths[j])
-        fit_quality += abs(dcm)
-        print(f"{_yfmt(int(y0)) + ' -> ' + _yfmt(int(y1)):<30} {dcm:>+16.6e}")
-    print(f"{'fit_quality = sum(|d_cm_deaths|)':<30} {fit_quality:>+16.6e}")
+    render(data_path=path, verbose=verbose)
