@@ -683,22 +683,6 @@ def render(
         r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
         return f"rgba({r}, {g}, {b}, {alpha})"
 
-    def _yearly_series(
-        years: np.ndarray,
-        values: np.ndarray,
-        start_year: float | None = None,
-        end_year: float | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        y0 = float(np.min(years) if start_year is None else start_year)
-        y1 = float(np.max(years) if end_year is None else end_year)
-        i0 = int(np.ceil(y0))
-        i1 = int(np.floor(y1))
-        if i1 < i0:
-            return np.array([], dtype=int), np.array([], dtype=float)
-        yr_int = np.arange(i0, i1 + 1)
-        val_int = np.interp(yr_int, years, values)
-        return yr_int, val_int
-
     def _integral_on_period(
         years: np.ndarray,
         values: np.ndarray,
@@ -716,26 +700,19 @@ def render(
 
     with tab_rate:
         fig = go.Figure()
-        flat_yr_plot, flat_D_plot_src = _yearly_series(
-            yr_model, D_model, start_year=float(flat_yr[0]), end_year=float(flat_yr[-1])
-        )
         fig.add_trace(go.Scatter(
-            x=2026.0 - flat_yr_plot if log_x else flat_yr_plot,
-            y=np.maximum(flat_D_plot_src, 1e-6) if log_y else flat_D_plot_src,
+            x=2026.0 - flat_yr if log_x else flat_yr,
+            y=np.maximum(flat_D, 1e-6) if log_y else flat_D,
             mode="lines",
             line=dict(color="#222222", width=2.5),
-            name=f"{_yfmt(int(round(flat_yr_plot[0])))} → {_yfmt(int(round(flat_yr_plot[-1])))} (flat analytic)",
-            customdata=[_yfmt(int(round(y))) for y in flat_yr_plot],
+            name=f"{_yfmt(int(flat_yr[0]))} → {_yfmt(int(flat_yr[-1]))} (flat analytic)",
+            customdata=[_yfmt(int(y)) for y in flat_yr],
             hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
         ))
         for j, pr in enumerate(r["periods"]):
             label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
-            yr, D_src = _yearly_series(
-                yr_model,
-                D_model,
-                start_year=float(anchor_years[j] + 1),
-                end_year=float(anchor_years[j + 1]),
-            )
+            yr = pr["yr_arr"][1:]
+            D_src = pr["D_arr"][1:]
             if len(yr) == 0:
                 continue
             y_vals = np.maximum(D_src, 1e-6) if log_y else D_src
@@ -763,15 +740,15 @@ def render(
             hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
         ))
 
-        ref_yr_plot, ref_y_base = _yearly_series(ref_yr, ref_2pi_age)
-        ref_y = np.maximum(ref_y_base, 1e-6) if log_y else ref_y_base
-        ref_x = 2026.0 - ref_yr_plot if log_x else ref_yr_plot
+        ref_D_ref = ref_2pi_age * density
+        ref_y = np.maximum(ref_D_ref, 1e-6) if log_y else ref_D_ref
+        ref_x = 2026.0 - ref_yr if log_x else ref_yr
         fig.add_trace(go.Scatter(
             x=ref_x, y=ref_y,
             mode="lines",
             line=dict(color="black", width=1.5, dash="dash"),
-            name="2π · age",
-            customdata=[_yfmt(int(round(y))) for y in ref_yr_plot],
+            name="2π · age · density",
+            customdata=[_yfmt(int(y)) for y in ref_yr],
             hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
         ))
 
@@ -1042,27 +1019,20 @@ def render(
     # ── C = D / density ───────────────────────────────────────────────────────
     # D = density · C · 1yr  →  C = D / density  (units: yr)
     fig_c = go.Figure()
-    flat_yr_c, flat_D_c = _yearly_series(
-        yr_model, D_model, start_year=float(flat_yr[0]), end_year=float(flat_yr[-1])
-    )
-    flat_C = flat_D_c / density
+    flat_C = flat_D / density
     fig_c.add_trace(go.Scatter(
-        x=2026.0 - flat_yr_c if log_x else flat_yr_c,
+        x=2026.0 - flat_yr if log_x else flat_yr,
         y=np.maximum(flat_C, 1e-30) if log_y else flat_C,
         mode="lines",
         line=dict(color="#222222", width=2.5),
-        name=f"{_yfmt(int(round(flat_yr_c[0])))} → {_yfmt(int(round(flat_yr_c[-1])))} (flat analytic)",
-        customdata=[_yfmt(int(round(y))) for y in flat_yr_c],
+        name=f"{_yfmt(int(flat_yr[0]))} → {_yfmt(int(flat_yr[-1]))} (flat analytic)",
+        customdata=[_yfmt(int(y)) for y in flat_yr],
         hovertemplate="%{customdata}  —  %{y:,.4g}<extra></extra>",
     ))
     for j, pr in enumerate(r["periods"]):
         label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
-        yr, D_src = _yearly_series(
-            yr_model,
-            D_model,
-            start_year=float(anchor_years[j] + 1),
-            end_year=float(anchor_years[j + 1]),
-        )
+        yr = pr["yr_arr"][1:]
+        D_src = pr["D_arr"][1:]
         if len(yr) == 0:
             continue
         C_arr = D_src / density          # C = D / density
