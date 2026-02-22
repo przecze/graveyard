@@ -637,12 +637,13 @@ def render(
     subheader("Deaths / yr — piecewise polynomial")
 
     # ── deaths/yr curve ───────────────────────────────────────────────────────
-    col_logy, col_logx = columns(2)
+    col_logy, col_logx, col_legend = columns(3)
     with col_logy:
         log_y = toggle("Log Y axis", value=False)
     with col_logx:
         log_x = toggle("Log X axis", value=False)
-    show_legend = toggle("Show legend", value=True)
+    with col_legend:
+        show_legend = toggle("Show legend", value=True)
 
     # Analytic flat ancient segment (included in plotting, excluded from fit).
     flat_yr = np.arange(ancient_start, fit_ancient_start + 1)
@@ -1114,7 +1115,11 @@ def render(
             autorange="reversed" if log_x else True,
         ),
         yaxis_type="log" if log_y else "linear",
-        legend=dict(x=0.01, y=0.99, xanchor="left", yanchor="top"),
+        legend=dict(
+            x=0.01, y=0.99, xanchor="left", yanchor="top",
+        ) if (not log_x and not log_y) else dict(
+            x=1.0, y=0.0, xanchor="right", yanchor="bottom",
+        ),
         showlegend=show_legend,
         margin=dict(t=40),
     )
