@@ -25,73 +25,67 @@ X_MODE_K_REF: dict[str, float | None] = {
 }
 
 
-def u_from_year(year_arr: np.ndarray, x_mode: str, K_ref: float | None) -> np.ndarray:
-    """Map calendar years to the fitting x-variable u.
+def _u_transform(year_arr: np.ndarray, logarithm_reference_year: float | None) -> np.ndarray:
+    """Map year-count values to the fitting x-variable u.
 
-    log_before_2026: u = ln(K_ref − year), clamped to 1e-9.
-    year:            u = year (bare calendar year).
+    logarithm_reference_year is None : u = t  (identity).
+    logarithm_reference_year is float: u = ln(ref − t), clamped to 1e-9.
     """
-    if x_mode == "year":
+    if logarithm_reference_year is None:
         return year_arr.astype(float)
-    assert K_ref is not None
-    return np.log(np.maximum(K_ref - year_arr, 1e-9))
+    return np.log(np.maximum(logarithm_reference_year - year_arr, 1e-9))
 
 
-def period_cumulative_deaths(data: dict, anchor_years: list[int]) -> np.ndarray:
-    """Target cumulative deaths per period from data anchors."""
-    n = len(anchor_years) - 1
-    deaths_tgt = np.zeros(n, dtype=float)
-    for j in range(n):
-        start_year = anchor_years[j]
-        end_row = data[anchor_years[j + 1]]
-        pop_start = 0.0 if anchor_years[j + 1] == -8_000 else float(data[start_year].get("pop", 0.0))
-        deaths_tgt[j] = float(end_row["cumulative_births"]) - float(end_row.get("pop", 0.0)) + pop_start
-    return deaths_tgt
-
-
-def fit_deaths_direct(
-    data: dict,
+def fit_piecewise_polynomial(
+    cumulated_D: dict[tuple[int, int], float],
+    quartic_period_ids: list[tuple[int, int]],
+    total_years: int,
     D_start: float | None = None,
     D_end: float | None = None,
     dDdy_start: float | None = None,
     d2Ddy2_start: float | None = None,
     dDdy_end: float | None = None,
     d2Ddy2_end: float | None = None,
-    x_mode: str = "log_before_2026",
+    logarithm_reference_year: float | None = None,
 ) -> dict:
-    """Fit deaths/yr as piecewise polynomial (cubic/quartic) in year-space.
+    """Fit deaths/yr as piecewise polynomial (cubic/quartic).
 
-    Cubic (4-param, degree 3) on most periods.
-    Quartic (5-param, degree 4) on 1200→1650 and the last two periods.
-    C2 seam continuity + 6 endpoint constraints → 4n+3 = n_params.
-    Solved as a linear system (instant).
+    Calendar-agnostic: works in year-count space (integers starting from 0).
+
+    Parameters
+    ----------
+    cumulated_D : mapping (start_t, end_t) → deaths
+        Cumulative death constraints per period in year-count space.
+    quartic_period_ids : list of (start_t, end_t)
+        Periods that get quartic (degree 4) polynomials; others get cubic.
+    total_years : int
+        Length of the output array.
+    logarithm_reference_year : float or None
+        None → u = t (identity); float → u = ln(ref − t).
+
+    Returns
+    -------
+    dict with D_fitted (ndarray, length total_years, NaN before fit start).
     """
-    if x_mode not in X_MODE_K_REF:
-        raise ValueError(f"x_mode must be one of {list(X_MODE_K_REF)}; got {x_mode!r}")
-    years = sorted(data.keys())
-    n = len(years) - 1
-    anchor_years = years
+
+    anchor_years = sorted({t for pair in cumulated_D for t in pair})
+    n = len(anchor_years) - 1
+    deaths_tgt = np.array([cumulated_D[(anchor_years[j], anchor_years[j + 1])] for j in range(n)])
 
     t0 = anchor_years[0]
-    K_ref = X_MODE_K_REF[x_mode]
-    K = (K_ref - t0) if K_ref is not None else None
     T_cumul = np.array([y - t0 for y in anchor_years])
     T_periods = np.diff(T_cumul)
-    deaths_tgt = period_cumulative_deaths(data, anchor_years)
     _anc_yr = np.array(anchor_years)
-    u_bnd = u_from_year(_anc_yr, x_mode, K_ref)
+    u_bnd = _u_transform(_anc_yr, logarithm_reference_year)
 
-    is_log_mode = x_mode != "year"
+    is_log_mode = logarithm_reference_year is not None
     mono_factor = 1.0 if is_log_mode else -1.0
 
-    # Quartic periods: 1200→1650 and the last two
+    quartic_set = set(quartic_period_ids)
     quartic_period_idx: set[int] = set()
     for j in range(n):
-        if anchor_years[j] == 1200 and anchor_years[j + 1] == 1650:
+        if (anchor_years[j], anchor_years[j + 1]) in quartic_set:
             quartic_period_idx.add(j)
-    if n >= 2:
-        quartic_period_idx.add(n - 2)
-        quartic_period_idx.add(n - 1)
     period_degree = np.array([4 if j in quartic_period_idx else 3 for j in range(n)], dtype=int)
 
     period_offsets = np.zeros(n + 1, dtype=int)
@@ -105,7 +99,7 @@ def fit_deaths_direct(
     for j in range(n):
         yr_j  = np.arange(anchor_years[j], anchor_years[j + 1] + 1)
         t_j   = yr_j - t0
-        u_j   = u_from_year(yr_j, x_mode, K_ref)
+        u_j   = _u_transform(yr_j, logarithm_reference_year)
         IU[j, 0] = T_periods[j]
         for k in range(1, int(period_degree[j]) + 1):
             IU[j, k] = np.trapezoid(u_j ** k, t_j)
@@ -136,10 +130,9 @@ def fit_deaths_direct(
         return coeff
 
     def _du_dy(y: int) -> tuple[float, float]:
-        if x_mode == "year":
+        if logarithm_reference_year is None:
             return 1.0, 0.0
-        assert K_ref is not None
-        rem = max(K_ref - y, 1e-9)
+        rem = max(logarithm_reference_year - y, 1e-9)
         return -1.0 / rem, -1.0 / (rem * rem)
 
     # n integral constraints
@@ -233,7 +226,7 @@ def fit_deaths_direct(
     MONO_TOL = 1_000.0
 
     def _u_j(j: int) -> np.ndarray:
-        return u_from_year(np.arange(anchor_years[j], anchor_years[j + 1] + 1), x_mode, K_ref)
+        return _u_transform(np.arange(anchor_years[j], anchor_years[j + 1] + 1), logarithm_reference_year)
 
     def _basis_matrix(u_arr: np.ndarray, degree: int, order: int) -> np.ndarray:
         """Return (len(u_arr), degree+1) basis matrix for given derivative order."""
@@ -248,14 +241,7 @@ def fit_deaths_direct(
 
     if null_dim == 0:
         theta = theta_p
-        mono_ok = all(
-            not np.any(mono_factor * _dDdu_theta(theta, j, _u_j(j)) > MONO_TOL)
-            for j in range(n)
-        )
     else:
-        # Build constraint matrices from integer years.
-        # Degree-3/4 polynomials need only ~30 pts/period to bound monotonicity for
-        # the optimizer; stride long periods so G rows stay tractable.
         MAX_OPT_PTS = 50
         G_blocks, h_blocks = [], []
         G_full_blocks, h_full_blocks = [], []
@@ -289,37 +275,19 @@ def fit_deaths_direct(
                        constraints={"type": "ineq", "fun": lambda x: h_opt + 1.0 - G_opt @ x, "jac": lambda x: -G_opt},
                        options={"ftol": 1e-15, "maxiter": 3_000})
         x_opt = sol.x
-        mono_ok = sol.success and np.all(G_full @ sol.x <= h_full + MONO_TOL)
-        if not mono_ok:
+        if not (sol.success and np.all(G_full @ sol.x <= h_full + MONO_TOL)):
             lam = 1e8
             sol2 = minimize(
                 lambda x: float(lam * np.sum(np.maximum(0.0, G_opt @ x - h_opt) ** 2) + x @ x),
                 np.zeros(null_dim), method="SLSQP", options={"ftol": 1e-20, "maxiter": 5_000})
             x_opt = sol2.x
-            mono_ok = bool(np.maximum(0.0, G_full @ x_opt - h_full).max() <= MONO_TOL)
         theta = theta_p + N_mat @ x_opt
 
-    periods = []
-    deaths_model = np.zeros(n)
+    D_fitted = np.full(total_years, np.nan)
     for j in range(n):
         yr_arr = np.arange(anchor_years[j], anchor_years[j + 1] + 1, dtype=int)
-        u_arr    = u_from_year(yr_arr, x_mode, K_ref)
-        D_arr    = np.maximum(0.0, _D_theta(theta, j, u_arr))
-        deaths_model[j] = np.trapezoid(_D_theta(theta, j, u_arr), yr_arr)
-        periods.append({"yr_arr": yr_arr, "u_arr": u_arr, "D_arr": D_arr})
+        u_arr  = _u_transform(yr_arr, logarithm_reference_year)
+        D_arr  = np.maximum(0.0, _D_theta(theta, j, u_arr))
+        D_fitted[anchor_years[j]:anchor_years[j + 1] + 1] = D_arr
 
-    return dict(
-        periods=periods,
-        deaths_tgt=deaths_tgt,
-        deaths_model=deaths_model,
-        anchor_years=anchor_years,
-        theta=theta,
-        mono_ok=mono_ok,
-        K=K,
-        K_ref=K_ref,
-        x_mode=x_mode,
-        T_cumul=T_cumul,
-        u_bnd=u_bnd,
-        n=n,
-        quartic_periods=[(anchor_years[j], anchor_years[j + 1]) for j in sorted(quartic_period_idx)],
-    )
+    return dict(D_fitted=D_fitted)
