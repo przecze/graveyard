@@ -53,9 +53,8 @@ import grad
 _DOCKER_PATH = Path("/data/data.json")
 _LOCAL_PATH  = Path(__file__).parent.parent / "frontend" / "src" / "data.json"
 
-IS_MAIN = __name__ == "__main__"
-if not IS_MAIN:
-    import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
 # ── x-variable modes (labels for UI; fit.X_MODE_K_REF used inside fit) ──────────
@@ -126,8 +125,6 @@ _COLOURS = [
 # ── Render (single computation flow) ────────────────────────────────────────────
 
 def render() -> None:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
 
     data = _load_data()
 
@@ -179,20 +176,13 @@ def render() -> None:
         step=1,
         help="Moving-average window for OWID deaths series. 0 = raw (no smoothing).",
     )
-    _LR_OPTIONS = [
-        0, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000,
-    ]
-    learning_rate = (
-        0.1
-        if IS_MAIN
-        else st.sidebar.select_slider(
+    learning_rate = ui.sidebar_select_slider(
             "Learning rate (grad optim)",
-            options=_LR_OPTIONS,
+            options=[0, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000],
             value=0.1,
             format_func=lambda v: "0" if v == 0 else f"{v:g}",
             help="Learning rate for one SGD step on sum(deaths array) loss.",
         )
-    )
 
     # Flat ancient segment is analytic (not fitted), then fit starts at
     # the post-flat ancient anchor and continues through the historical anchors.
@@ -202,46 +192,93 @@ def render() -> None:
 
     flat_deaths = round(np.pi * (ancient_flat_length ** 2) * density)
     late_ancient_deaths = ancient_total_deaths - flat_deaths
-    late_ancient_start_D = 2.0 * np.pi * (ancient_flat_length + 1) * density
-    dDdy_start = 2.0 * np.pi * density
-    d2Ddy2_start = 0.0
-    D_end_val, dDdy_end, d2Ddy2_end = _owid_endpoint_constraints(window=owid_smooth_window)
+    D_late_ancient_start = 2.0 * np.pi * (ancient_flat_length + 1) * density
+    dDdy_late_ancient_start = 2.0 * np.pi * density
+    d2Ddy2_late_ancient_start = 0.0
+    D_1950, dDdy_1950, d2Ddy2_1950 = _owid_endpoint_constraints(window=owid_smooth_window)
 
     ui.write(f"[pre-fit] flat_len_years={ancient_flat_length}")
     ui.write(f"[pre-fit] flat_density={density:.6g} graves/yr^2")
     ui.write(f"[pre-fit] flat_deaths=pi*L^2*density={flat_deaths:_.0f}")
     ui.write(f"[pre-fit] late_ancient_deaths=ancient_total-flat={late_ancient_deaths:_.0f}")
-    ui.write(f"[pre-fit] late_ancient_start_D=2*pi*L*density={late_ancient_start_D:_.1f} deaths/yr")
+    ui.write(f"[pre-fit] D_late_ancient_start=2*pi*L*density={D_late_ancient_start:_.1f} deaths/yr")
+
+    data_years = sorted(data.keys())
+    for j in range(len(data_years) - 1):
+        cal_start = data_years[j]
+        cal_end = data_years[j + 1]
+        t_start = cal_start - ancient_start
+        t_end = cal_end - ancient_start
+        if j == 0:
+            deaths = late_ancient_deaths
+        else:
+            end_row = data[cal_end]
+            pop_start = data[cal_start]["pop"]
+            data[cal_end]["cumulative_deaths"] = end_row["cumulative_births"] - end_row["pop"] + pop_start
 
     extended_data = {
-        fit_ancient_start: {"pop": 0, "cbr": 0},
+        fit_ancient_start: {"pop": 0, "cbr": 0, "cumulative_deaths": flat_deaths},
         **data,
     }
-    extended_data[-8_000] = {
-        **extended_data[-8_000],
-        "cumulative_deaths_estimated": late_ancient_deaths,
-    }
+    extended_data[-8_000]["cumulative_deaths"] = late_ancient_deaths
+    extended_data_years = sorted(extended_data.keys())
+
+    # ── Build cumulated_D in year-count space (t = cal_year − ancient_start) ──
+    anchor_cal_years = extended_data_years
+    cumulated_D: dict[tuple[int, int], float] = {}
+    for j in range(len(anchor_cal_years) - 1):
+        cal_start = anchor_cal_years[j]
+        cal_end = anchor_cal_years[j + 1]
+        t_start = cal_start - ancient_start
+        t_end = cal_end - ancient_start
+        if j == 0:
+            deaths = late_ancient_deaths
+        else:
+            end_row = extended_data[cal_end]
+            pop_start = extended_data[cal_start]["pop"]
+            deaths = end_row["cumulative_births"] - end_row["pop"] + pop_start
+        cumulated_D[(t_start, t_end)] = deaths
+
+    quartic_period_ids: list[tuple[int, int]] = []
+    n_periods = len(anchor_cal_years) - 1
+    quartic_period_ids.append((1200 - ancient_start, 1650 - ancient_start))
+    quartic_period_ids.append((anchor_cal_years[-3] - ancient_start, anchor_cal_years[-2] - ancient_start))
+    quartic_period_ids.append((anchor_cal_years[-2] - ancient_start, anchor_cal_years[-1] - ancient_start))
+
+    total_years = anchor_cal_years[-1] - ancient_start + 1
+
+    ui.write("---")
+    ui.write(f"**ancient_start={ancient_start}, fit_ancient_start={fit_ancient_start}**")
+    ui.write(f"**total_years={total_years}, flat_length={ancient_flat_length}**")
+    ui.write(f"**cumulated_D** (year-count space, t=0 is {_yfmt(ancient_start)}):")
+    for (ts, te), d in cumulated_D.items():
+        cal_s = ts + ancient_start
+        cal_e = te + ancient_start
+        ui.write(f"  ({ts:>6}, {te:>6}) → {d:>20,.0f}  [{_yfmt(cal_s)} → {_yfmt(cal_e)}]")
+    ui.write(f"**quartic_period_ids:** {quartic_period_ids}")
+    ui.write("---")
+
+    logarithm_reference_year = fit.X_MODE_K_REF[x_mode]
+    if logarithm_reference_year is not None:
+        logarithm_reference_year -= ancient_start
 
     with ui.spinner("Fitting deaths/yr piecewise polynomial…"):
-        r = fit.fit_deaths_direct(
-            data=extended_data,
-            D_start=late_ancient_start_D,
-            D_end=D_end_val,
-            dDdy_start=dDdy_start,
-            d2Ddy2_start=d2Ddy2_start,
-            dDdy_end=dDdy_end,
-            d2Ddy2_end=d2Ddy2_end,
-            x_mode=x_mode,
+        r = fit.fit_piecewise_polynomial(
+            cumulated_D=cumulated_D,
+            quartic_period_ids=quartic_period_ids,
+            total_years=total_years,
+            D_start=D_late_ancient_start,
+            D_end=D_1950,
+            dDdy_start=dDdy_late_ancient_start,
+            d2Ddy2_start=d2Ddy2_late_ancient_start,
+            dDdy_end=dDdy_1950,
+            d2Ddy2_end=d2Ddy2_1950,
+            logarithm_reference_year=logarithm_reference_year,
         )
 
-    anchor_years = r["anchor_years"]
-    n            = r["n"]
-
-    if not r["mono_ok"]:
-        ui.warning(
-            "Hard monotonicity constraint infeasible for this dataset — "
-            "soft-penalty solution used; deaths/yr may not be strictly non-decreasing."
-        )
+    D_fitted = r["D_fitted"]
+    anchor_years = anchor_cal_years
+    n = n_periods
 
     ui.subheader("Deaths / yr — piecewise polynomial")
 
@@ -261,8 +298,10 @@ def render() -> None:
 
     # Dashed/reference density comes directly from the density slider.
 
-    yr_model_fit = np.concatenate([pr["yr_arr"][1:] for pr in r["periods"]])
-    D_model_fit = np.concatenate([pr["D_arr"][1:] for pr in r["periods"]])
+    fit_start_t = ancient_flat_length
+    fit_end_t = total_years - 1
+    yr_model_fit = np.arange(fit_ancient_start + 1, anchor_cal_years[-1] + 1)
+    D_model_fit = D_fitted[fit_start_t + 1 : fit_end_t + 1]
 
     # OWID extension arrays (smoothed; 1950 included for a seamless join with the model)
     if owid_smooth_window >= 1:
@@ -309,7 +348,7 @@ def render() -> None:
 
     # One torch optim step: loss = sum_j (desired_j - integral_j)^2
     lr = float(learning_rate)
-    _deaths_tgt_t = torch.tensor(r["deaths_tgt"], dtype=torch.float64)
+    _deaths_tgt_t = torch.tensor(list(cumulated_D.values()), dtype=torch.float64)
 
     D_param = D_for_grad_optim.detach().clone().requires_grad_(True)
     optimizer = torch.optim.SGD([D_param], lr=lr)
@@ -459,15 +498,15 @@ def render() -> None:
             customdata=[_yfmt(int(y)) for y in flat_yr],
             hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
         ))
-        for j, pr in enumerate(r["periods"]):
+        for j in range(n):
             label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
-            yr = pr["yr_arr"][1:]
-            D_src = pr["D_arr"][1:]
+            t_s = anchor_years[j] - ancient_start
+            t_e = anchor_years[j + 1] - ancient_start
+            yr = np.arange(anchor_years[j] + 1, anchor_years[j + 1] + 1)
+            D_src = D_fitted[t_s + 1 : t_e + 1]
             if len(yr) == 0:
                 continue
             y_vals = np.maximum(D_src, 1e-6) if log_y else D_src
-            # log X: plot years-before-present (always positive) on log scale,
-            # then reverse the axis so recent time stays on the right.
             x_vals   = 2026.0 - yr if log_x else yr
             hover_yr = [_yfmt(int(round(y))) for y in yr]
             fig.add_trace(go.Scatter(
@@ -640,8 +679,7 @@ def render() -> None:
             hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
         ))
 
-        # Fitted period segments (same labels/colours as deaths/yr tab)
-        for j, pr in enumerate(r["periods"]):
+        for j in range(n):
             seg_mask = (
                 (yr_all_plot >= anchor_years[j] + 1)
                 & (yr_all_plot <= anchor_years[j + 1])
@@ -781,13 +819,15 @@ def render() -> None:
         customdata=[_yfmt(int(y)) for y in flat_yr],
         hovertemplate="%{customdata}  —  %{y:,.4g}<extra></extra>",
     ))
-    for j, pr in enumerate(r["periods"]):
+    for j in range(n):
         label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
-        yr = pr["yr_arr"][1:]
-        D_src = pr["D_arr"][1:]
+        t_s = anchor_years[j] - ancient_start
+        t_e = anchor_years[j + 1] - ancient_start
+        yr = np.arange(anchor_years[j] + 1, anchor_years[j + 1] + 1)
+        D_src = D_fitted[t_s + 1 : t_e + 1]
         if len(yr) == 0:
             continue
-        C_arr = D_src / density          # C = D / density
+        C_arr = D_src / density
         x_vals   = 2026.0 - yr if log_x else yr
         y_vals   = np.maximum(C_arr, 1e-30) if log_y else C_arr
         hover_yr = [_yfmt(int(round(y))) for y in yr]

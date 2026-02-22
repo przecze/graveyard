@@ -28,6 +28,10 @@ def sidebar_slider(label, *, min_value, max_value, value, step=None, help=""):
     if IS_MAIN: return value
     return st.sidebar.slider(label, min_value=min_value, max_value=max_value, value=value, step=step, help=help)
 
+def sidebar_select_slider(label, *, options, value, format_func=None, help=""):
+    if IS_MAIN: return value
+    return st.sidebar.select_slider(label, options=options, value=value, format_func=format_func, help=help)
+
 def spinner(msg):
     if IS_MAIN: return contextlib.nullcontext()
     return st.spinner(msg)
