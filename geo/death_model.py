@@ -28,15 +28,18 @@ population carry-over:
 with a special-case baseline pop[start_j] = 0 when end_j is -8_000.
 
 Always run this module via `uv run`.
-Standalone : uv run death_model.py [path/to/data.json] [--verbose]
+Standalone : uv run death_model.py
+
+Note: run this module as standalone after EVERY CHANGE as a test
+
 Streamlit  : import death_model; death_model.render()
 """
 
 from __future__ import annotations
 
 import contextlib
+import csv
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -76,27 +79,19 @@ def _u_from_year(year_arr: np.ndarray, x_mode: str, K_ref: float | None) -> np.n
 
 
 # OWID actual deaths/yr (UN World Population Prospects 2024), 1950–2023
-_OWID_DEATHS: dict[int, int] = {
-    1950: 48_486_892, 1951: 48_176_160, 1952: 47_383_364, 1953: 47_239_576,
-    1954: 46_662_428, 1955: 46_635_656, 1956: 46_479_064, 1957: 46_880_776,
-    1958: 46_518_264, 1959: 50_724_510, 1960: 54_612_440, 1961: 49_918_924,
-    1962: 46_061_450, 1963: 46_913_210, 1964: 46_822_880, 1965: 48_213_548,
-    1966: 47_841_524, 1967: 47_568_790, 1968: 47_629_250, 1969: 47_815_950,
-    1970: 48_163_468, 1971: 49_384_108, 1972: 47_770_224, 1973: 47_573_276,
-    1974: 47_478_096, 1975: 47_622_990, 1976: 47_707_256, 1977: 47_166_790,
-    1978: 47_293_144, 1979: 46_963_884, 1980: 47_349_924, 1981: 47_470_790,
-    1982: 47_659_344, 1983: 48_206_576, 1984: 48_430_624, 1985: 48_772_812,
-    1986: 48_643_612, 1987: 48_657_012, 1988: 49_183_184, 1989: 49_178_264,
-    1990: 49_794_344, 1991: 50_108_430, 1992: 50_281_870, 1993: 50_831_804,
-    1994: 51_930_610, 1995: 51_406_890, 1996: 51_410_956, 1997: 51_432_010,
-    1998: 51_853_504, 1999: 52_183_584, 2000: 52_240_370, 2001: 52_431_244,
-    2002: 52_757_536, 2003: 53_077_070, 2004: 53_187_800, 2005: 53_390_436,
-    2006: 53_281_776, 2007: 53_410_050, 2008: 53_987_020, 2009: 54_122_624,
-    2010: 54_268_588, 2011: 54_581_440, 2012: 54_794_788, 2013: 55_092_620,
-    2014: 55_545_320, 2015: 56_305_970, 2016: 56_756_910, 2017: 57_572_256,
-    2018: 57_792_804, 2019: 58_354_932, 2020: 63_546_316, 2021: 69_728_100,
-    2022: 62_278_628, 2023: 61_651_610,
-}
+_OWID_CSV_PATH = Path(__file__).parent / "owid_deaths.csv"
+
+
+def _load_owid_deaths() -> dict[int, int]:
+    """Load OWID deaths series from CSV (year, deaths)."""
+    out: dict[int, int] = {}
+    with open(_OWID_CSV_PATH, newline="") as f:
+        for row in csv.DictReader(f):
+            out[int(row["year"])] = int(row["deaths"])
+    return out
+
+
+_OWID_DEATHS: dict[int, int] = _load_owid_deaths()
 # Sorted list of (year, deaths/yr) for convenient iteration
 _OWID_SERIES: list[tuple[int, int]] = sorted(_OWID_DEATHS.items())
 
@@ -125,10 +120,9 @@ def _owid_endpoint_constraints(window: int = 5) -> tuple[float, float, float]:
 
 # ── data loading ───────────────────────────────────────────────────────────────
 
-def _load_data(data_path: Path | str | None) -> tuple[dict, list[int]]:
-    if data_path is None:
-        data_path = _DOCKER_PATH if _DOCKER_PATH.exists() else _LOCAL_PATH
-    with open(data_path) as f:
+def _load_data() -> tuple[dict, list[int]]:
+    path = _DOCKER_PATH if _DOCKER_PATH.exists() else _LOCAL_PATH
+    with open(path) as f:
         raw = json.load(f)
     data = {int(k): v for k, v in raw.items()}
     return data, sorted(data.keys())
@@ -152,9 +146,7 @@ def _period_cumulative_deaths(data: dict, anchor_years: list[int]) -> np.ndarray
 # ── fitting ────────────────────────────────────────────────────────────────────
 
 def fit_deaths_direct(
-    data_path: Path | str | None = None,
-    verbose: bool = False,
-    data: dict | None = None,
+    data: dict,
     D_start: float | None = None,
     D_end: float | None = None,
     dDdy_start: float | None = None,
@@ -172,10 +164,7 @@ def fit_deaths_direct(
     """
     if x_mode not in _X_MODE_K_REF:
         raise ValueError(f"x_mode must be one of {list(_X_MODE_K_REF)}; got {x_mode!r}")
-    if data is None:
-        data, years = _load_data(data_path)
-    else:
-        years = sorted(data.keys())
+    years = sorted(data.keys())
     n = len(years) - 1
     anchor_years = years
 
@@ -321,9 +310,8 @@ def fit_deaths_direct(
     null_dim = N_mat.shape[1]
     expected_null_dim = n_params - n_constr
 
-    if verbose:
-        print(f"n={n}, n_params={n_params}, n_constr={n_constr}, expected_null={expected_null_dim}")
-        print(f"rank={rank}, null_dim={null_dim}, κ={sv[0]/sv[-1]:.2e}")
+    print(f"n={n}, n_params={n_params}, n_constr={n_constr}, expected_null={expected_null_dim}")
+    print(f"rank={rank}, null_dim={null_dim}, κ={sv[0]/sv[-1]:.2e}")
 
     def _poly_eval(theta_vec, j, u, order):
         deg = int(period_degree[j])
@@ -429,7 +417,6 @@ def fit_deaths_direct(
         mono_ok=mono_ok,
         K=K,
         K_ref=K_ref,
-        t0=t0,
         x_mode=x_mode,
         T_cumul=T_cumul,
         u_bnd=u_bnd,
@@ -511,16 +498,11 @@ def dataframe(df, width="stretch"):
 
 # ── Render (single computation flow) ────────────────────────────────────────────
 
-def render(
-    *,
-    data_path: Path | str | None = None,
-    verbose: bool = False,
-) -> None:
+def render() -> None:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    if data_path is None:
-        data_path = _DOCKER_PATH if _DOCKER_PATH.exists() else _LOCAL_PATH
+    data, _ = _load_data()
 
     # ── x-variable mode ───────────────────────────────────────────────────────
     x_mode = sidebar_radio(
@@ -542,7 +524,6 @@ def render(
         step=500,
         help="Duration of the pre-history period prepended before the first data anchor (-8_000).",
     )
-    data, _ = _load_data(data_path)
     yc             = ancient_length
     ancient_start  = -8_000 - yc
 
@@ -622,7 +603,6 @@ def render(
             dDdy_end=dDdy_end,
             d2Ddy2_end=d2Ddy2_end,
             x_mode=x_mode,
-            verbose=verbose,
         )
 
     anchor_years = r["anchor_years"]
@@ -1162,8 +1142,4 @@ def render(
 # ── CLI entry point (single computation flow via render) ───────────────────────
 
 if __name__ == "__main__":
-    args      = sys.argv[1:]
-    verbose   = "--verbose" in args
-    path_args = [a for a in args if not a.startswith("--")]
-    path      = Path(path_args[0]) if path_args else None
-    render(data_path=path, verbose=verbose)
+    render()
