@@ -545,10 +545,6 @@ def render() -> None:
     with col_logx:
         log_x = st.toggle("Log X axis", value=False)
     show_legend = st.toggle("Show legend", value=True)
-    smooth_enabled = False
-    smoothing_method = "none"
-    smooth_delta = 16
-    smooth_max_d2 = None
 
     # Analytic flat ancient segment (included in plotting, excluded from fit).
     flat_yr = np.linspace(float(ancient_start), float(fit_ancient_start), N_GRID)
@@ -617,132 +613,7 @@ def render() -> None:
         y = np.interp(x, years, values)
         return float(np.trapezoid(y, x))
 
-    def _smooth_single_window(
-        x_arr: np.ndarray,
-        y_arr: np.ndarray,
-        seam_year: float,
-        delta_years: int,
-        max_d2: float,
-    ) -> tuple[np.ndarray, bool]:
-        window_mask = (x_arr >= seam_year - delta_years) & (x_arr <= seam_year + delta_years)
-        win_idx = np.where(window_mask)[0]
-        if len(win_idx) < 3:
-            return y_arr, True
-
-        y_ref = y_arr.copy()
-        area_target = float(np.sum(y_ref[win_idx]))
-        # Relative d2 cap: scale by local level so slider remains usable
-        # across very different historical magnitudes.
-        y_scale = max(1.0, float(np.mean(np.abs(y_ref[win_idx]))))
-        max_d2_abs = max_d2 * y_scale
-        local_idx = {g: k for k, g in enumerate(win_idx.tolist())}
-
-        # Build linear stencil maps for all d2 constraints touched by the window.
-        st_lo = max(1, int(win_idx[0]) - 1)
-        st_hi = min(len(y_ref) - 2, int(win_idx[-1]) + 1)
-        A_rows: list[np.ndarray] = []
-        c_rows: list[float] = []
-        for i in range(st_lo, st_hi + 1):
-            coeff = np.zeros(len(win_idx), dtype=float)
-            c_val = float(y_ref[i + 1] - 2.0 * y_ref[i] + y_ref[i - 1])
-            for g_idx, mul in ((i - 1, 1.0), (i, -2.0), (i + 1, 1.0)):
-                k = local_idx.get(g_idx)
-                if k is not None:
-                    coeff[k] += mul
-                    c_val -= mul * y_ref[g_idx]
-            A_rows.append(coeff)
-            c_rows.append(c_val)
-
-        def objective(z: np.ndarray) -> float:
-            return float(np.sum((z - y_ref[win_idx]) ** 2))
-
-        constraints = [
-            {"type": "eq", "fun": lambda z: float(np.sum(z) - area_target)},
-        ]
-
-        for a_row, c_row in zip(A_rows, c_rows):
-            constraints.append(
-                {
-                    "type": "ineq",
-                        "fun": lambda z, a_row=a_row, c_row=c_row: float(max_d2_abs - (a_row @ z + c_row)),
-                }
-            )
-            constraints.append(
-                {
-                    "type": "ineq",
-                    "fun": lambda z, a_row=a_row, c_row=c_row: float(max_d2_abs + (a_row @ z + c_row)),
-                }
-            )
-
-        result = minimize(
-            objective,
-            x0=y_ref[win_idx],
-            method="SLSQP",
-            constraints=constraints,
-            options={"maxiter": 120, "ftol": 1e-8, "disp": False},
-        )
-        if not result.success:
-            return y_arr, False
-        y_out = y_ref.copy()
-        y_out[win_idx] = result.x
-        return y_out, True
-
-    def _moving_average_edge_preserving(y_arr: np.ndarray, window: int) -> np.ndarray:
-        """Centered moving average with edge-value padding (no zero-padding loss)."""
-        win = max(1, int(window))
-        if win <= 1:
-            return y_arr.copy()
-        left = win // 2
-        right = win - 1 - left
-        y_pad = np.pad(y_arr, (left, right), mode="edge")
-        kernel = np.ones(win, dtype=float) / float(win)
-        return np.convolve(y_pad, kernel, mode="valid")
-
     tab_rate, tab_cumul = st.tabs(["deaths/yr", "cumulative deaths"])
-
-    D_model_raw = D_model.copy()
-    seam_years = [float(y) for y in anchor_years[1:-1] if int(y) != 1950]
-    smooth_failures = 0
-    if smooth_enabled:
-        yr_int = np.arange(int(np.ceil(yr_model[0])), int(np.floor(yr_model[-1])) + 1, dtype=float)
-        D_int = np.interp(yr_int, yr_model, D_model)
-        if smoothing_method == "Seam smoothing":
-            for seam_y in seam_years:
-                D_next, ok = _smooth_single_window(
-                    x_arr=yr_int,
-                    y_arr=D_int,
-                    seam_year=seam_y,
-                    delta_years=smooth_delta,
-                    max_d2=float(smooth_max_d2),
-                )
-                if not ok:
-                    smooth_failures += 1
-                D_int = D_next
-            D_model = np.interp(yr_model, yr_int, D_int)
-        else:
-            yr_all_base = np.concatenate([yr_model, yr_owid_ext])
-            D_all_base = np.concatenate([D_model, D_owid_ext])
-            yr_int_all = np.arange(
-                int(np.ceil(yr_all_base[0])),
-                int(np.floor(yr_all_base[-1])) + 1,
-                dtype=float,
-            )
-            D_int_all = np.interp(yr_int_all, yr_all_base, D_all_base)
-            area_before = float(np.trapezoid(D_int_all, yr_int_all))
-            D_int_all = _moving_average_edge_preserving(D_int_all, int(smooth_delta))
-            area_after = float(np.trapezoid(D_int_all, yr_int_all))
-            if abs(area_after) > 1e-12:
-                D_int_all *= area_before / area_after
-            D_all_smoothed = np.interp(yr_all_base, yr_int_all, D_int_all)
-            D_model = D_all_smoothed[: len(yr_model)]
-            D_owid_ext = D_all_smoothed[len(yr_model) :]
-            _owid_D_plot = np.concatenate(
-                ([float(np.interp(1950.0, yr_model, D_model))], D_owid_ext)
-            )
-    D_model_smooth = D_model.copy()
-    yr_int_smooth, D_int_smooth = _yearly_series(yr_model, D_model_smooth)
-    D_int_rounded = np.rint(D_int_smooth)
-    D_all = np.concatenate([D_model, D_owid_ext])
 
     with tab_rate:
         fig = go.Figure()
@@ -823,17 +694,6 @@ def render() -> None:
             margin=dict(t=40),
         )
         st.plotly_chart(fig, width="stretch")
-        if smooth_enabled:
-            if smoothing_method == "Seam smoothing":
-                st.caption(
-                    f"Seam smoothing applied at {len(seam_years)} fitted boundaries "
-                    f"(excluding 1950); delta={smooth_delta} years, max |d2|_rel={float(smooth_max_d2):.4g}; "
-                    f"non-converged windows={smooth_failures}."
-                )
-            else:
-                st.caption(
-                    f"Moving-average smoothing applied with sliding window={int(smooth_delta)} years."
-                )
 
         with st.expander("Deaths/yr numeric derivatives", expanded=False):
             yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1, dtype=float)
@@ -1043,9 +903,7 @@ def render() -> None:
         period_start = float(ancient_start) if idx == 0 else float(years_sorted[idx - 1])
         period_end = float(year)
         period_label = f"{_yfmt(int(round(period_start)))} → {_yfmt(int(year))}"
-        cm_reconstructed = _integral_on_period(yr_model, D_model_raw, period_start, period_end)
-        cm_reconstructed_smooth = _integral_on_period(yr_model, D_model_smooth, period_start, period_end)
-        cm_reconstructed_round = _integral_on_period(yr_int_smooth, D_int_rounded, period_start, period_end)
+        cm_reconstructed = _integral_on_period(yr_model, D_model, period_start, period_end)
         cm_deaths_rows.append({
             "period": period_label,
             "year": year,
@@ -1054,15 +912,13 @@ def render() -> None:
             "pop_before": pop_before,
             "cm_deaths": cm_deaths,
             "d_cm_deaths_reconstructed": cm_reconstructed - cm_deaths,
-            "d_cm_deaths_reconstructed_after_smoothing": cm_reconstructed_smooth - cm_deaths,
-            "d_cm_deaths_reconstructed_after_rounding": cm_reconstructed_round - cm_deaths,
         })
 
     fit_quality = float(
         np.sum(
             np.abs(
                 [
-                    r["d_cm_deaths_reconstructed_after_smoothing"]
+                    r["d_cm_deaths_reconstructed"]
                     for r in cm_deaths_rows
                 ]
             )
@@ -1086,7 +942,6 @@ def render() -> None:
 
     # ── C = D / density ───────────────────────────────────────────────────────
     # D = density · C · 1yr  →  C = D / density  (units: yr)
-    st.subheader("C = D / density  (yr)")
     fig_c = go.Figure()
     flat_yr_c, flat_D_c = _yearly_series(
         yr_model, D_model, start_year=float(flat_yr[0]), end_year=float(flat_yr[-1])
@@ -1153,7 +1008,7 @@ def render() -> None:
     ))
 
     fig_c.update_layout(
-        title="C = D / density  vs  2π · age",
+        title="C = D / density",
         xaxis_title="Years before 2026 (log)" if log_x else "Year (−ve = BCE)",
         yaxis_title="C  (yr)",
         xaxis=dict(
@@ -1230,8 +1085,6 @@ def render() -> None:
     fig_k.update_layout(title="Curvature K = −f″/f", height=350, showlegend=show_legend, margin=dict(t=50))
     st.plotly_chart(fig_k, width="stretch")
 
-    st.stop()
-
 
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
@@ -1240,18 +1093,6 @@ if __name__ == "__main__":
     verbose   = "--verbose" in args
     path_args = [a for a in args if not a.startswith("--")]
     path      = Path(path_args[0]) if path_args else None
-    do_iterate = "--iterate" in args
-
-    _smooth_method = "none"
-    _smooth_delta = 16
-    for a in args:
-        if a.startswith("--smooth-method="):
-            _smooth_method = a.split("=", 1)[1].strip().lower()
-        elif a.startswith("--smooth-delta="):
-            _smooth_delta = max(1, int(a.split("=", 1)[1]))
-    if _smooth_method not in {"moving", "none"}:
-        raise ValueError("--smooth-method must be one of: moving, none")
-
     _yc_default = 6_000
     _data, _    = _load_data(path)
     _ancient_start = -8000 - _yc_default
@@ -1277,18 +1118,6 @@ if __name__ == "__main__":
     _D_model = np.concatenate(
         [r["periods"][0]["D_arr"]] + [pr["D_arr"][1:] for pr in r["periods"][1:]]
     )
-    _yr_int = np.arange(int(np.ceil(_yr_model[0])), int(np.floor(_yr_model[-1])) + 1, dtype=float)
-    _D_int_raw = np.interp(_yr_int, _yr_model, _D_model)
-
-    def _ma_edge(y_arr: np.ndarray, window: int) -> np.ndarray:
-        win = max(1, int(window))
-        if win <= 1:
-            return y_arr.copy()
-        left = win // 2
-        right = win - 1 - left
-        y_pad = np.pad(y_arr, (left, right), mode="edge")
-        ker = np.ones(win, dtype=float) / float(win)
-        return np.convolve(y_pad, ker, mode="valid")
 
     def _period_integral(years: np.ndarray, values: np.ndarray, y0: float, y1: float) -> float:
         if y1 <= y0:
@@ -1298,30 +1127,14 @@ if __name__ == "__main__":
         y = np.interp(x, years, values)
         return float(np.trapezoid(y, x))
 
-    def _print_diffs_for_delta(delta: int) -> None:
-        if _smooth_method == "none":
-            _D_int_s = _D_int_raw.copy()
-        else:
-            area_before = float(np.trapezoid(_D_int_raw, _yr_int))
-            _D_int_s = _ma_edge(_D_int_raw, delta)
-            area_after = float(np.trapezoid(_D_int_s, _yr_int))
-            if abs(area_after) > 1e-12:
-                _D_int_s = _D_int_s * (area_before / area_after)
-        _D_s = np.interp(_yr_model, _yr_int, _D_int_s)
-        print(f"\n[reconstructed diffs after smoothing] method={_smooth_method} delta={delta}")
-        print(f"{'Period':<30} {'d_cm_deaths':>16}")
-        fit_quality = 0.0
-        for j in range(len(_years) - 1):
-            y0 = float(_years[j])
-            y1 = float(_years[j + 1])
-            recon = _period_integral(_yr_model, _D_s, y0, y1)
-            dcm = recon - float(_cm_deaths[j])
-            fit_quality += abs(dcm)
-            print(f"{_yfmt(int(y0)) + ' -> ' + _yfmt(int(y1)):<30} {dcm:>+16.6e}")
-        print(f"{'fit_quality = sum(|d_cm_deaths|)':<30} {fit_quality:>+16.6e}")
-
-    if do_iterate:
-        for d in (4, 8, 12, 16, 24, 32):
-            _print_diffs_for_delta(d)
-    else:
-        _print_diffs_for_delta(_smooth_delta)
+    print(f"\n[reconstructed diffs]")
+    print(f"{'Period':<30} {'d_cm_deaths':>16}")
+    fit_quality = 0.0
+    for j in range(len(_years) - 1):
+        y0 = float(_years[j])
+        y1 = float(_years[j + 1])
+        recon = _period_integral(_yr_model, _D_model, y0, y1)
+        dcm = recon - float(_cm_deaths[j])
+        fit_quality += abs(dcm)
+        print(f"{_yfmt(int(y0)) + ' -> ' + _yfmt(int(y1)):<30} {dcm:>+16.6e}")
+    print(f"{'fit_quality = sum(|d_cm_deaths|)':<30} {fit_quality:>+16.6e}")
