@@ -38,7 +38,7 @@ def _u_transform(year_arr: np.ndarray, logarithm_reference_year: float | None) -
 
 def fit_piecewise_polynomial(
     cumulated_D: dict[tuple[int, int], float],
-    quartic_period_ids: list[tuple[int, int]],
+    quartic_period_ids: list[int],
     total_years: int,
     D_start: float | None = None,
     D_end: float | None = None,
@@ -56,8 +56,9 @@ def fit_piecewise_polynomial(
     ----------
     cumulated_D : mapping (start_t, end_t) → deaths
         Cumulative death constraints per period in year-count space.
-    quartic_period_ids : list of (start_t, end_t)
-        Periods that get quartic (degree 4) polynomials; others get cubic.
+    quartic_period_ids : list of int
+        Indices of cumulated_D periods (0, 1, 2, …) that get quartic (degree 4)
+        polynomials; others get cubic.
     total_years : int
         Length of the output array.
     logarithm_reference_year : float or None
@@ -81,11 +82,7 @@ def fit_piecewise_polynomial(
     is_log_mode = logarithm_reference_year is not None
     mono_factor = 1.0 if is_log_mode else -1.0
 
-    quartic_set = set(quartic_period_ids)
-    quartic_period_idx: set[int] = set()
-    for j in range(n):
-        if (anchor_years[j], anchor_years[j + 1]) in quartic_set:
-            quartic_period_idx.add(j)
+    quartic_period_idx = set(quartic_period_ids)
     period_degree = np.array([4 if j in quartic_period_idx else 3 for j in range(n)], dtype=int)
 
     period_offsets = np.zeros(n + 1, dtype=int)
