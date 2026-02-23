@@ -32,6 +32,10 @@ def sidebar_select_slider(label, *, options, value, format_func=None, help=""):
     if IS_MAIN: return value
     return st.sidebar.select_slider(label, options=options, value=value, format_func=format_func, help=help)
 
+def sidebar_toggle(label, *, value=False, help=""):
+    if IS_MAIN: return value
+    return st.sidebar.toggle(label, value=value, help=help)
+
 def spinner(msg):
     if IS_MAIN: return contextlib.nullcontext()
     return st.spinner(msg)

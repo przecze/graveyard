@@ -239,11 +239,14 @@ def render() -> None:
             deaths = end_row["cumulative_births"] - end_row["pop"] + pop_start
         cumulated_D[(t_start, t_end)] = deaths
 
-    quartic_period_ids: list[tuple[int, int]] = []
     n_periods = len(anchor_cal_years) - 1
-    quartic_period_ids.append((1200 - ancient_start, 1650 - ancient_start))
-    quartic_period_ids.append((anchor_cal_years[-3] - ancient_start, anchor_cal_years[-2] - ancient_start))
-    quartic_period_ids.append((anchor_cal_years[-2] - ancient_start, anchor_cal_years[-1] - ancient_start))
+    quartic_period_ids: list[int] = []
+    for j in range(n_periods):
+        if anchor_cal_years[j] == 1200:
+            quartic_period_ids.append(j)
+            break
+    quartic_period_ids.append(n_periods - 2)
+    quartic_period_ids.append(n_periods - 1)
 
     total_years = anchor_cal_years[-1] - ancient_start + 1
 
@@ -323,10 +326,15 @@ def render() -> None:
     # Extract deaths per year from late ancient (start + flat length) through 1949
     grad_optim_start_yr = fit_ancient_start
     mask = (yr_model >= grad_optim_start_yr) & (yr_model <= 1949)
-    yr_for_grad_optim = torch.tensor(yr_model[mask], dtype=torch.float64)
     D_for_grad_optim = torch.tensor(D_model[mask], dtype=torch.float64)
-    first_yr_included = int(yr_for_grad_optim[0].item())
-    last_yr_included = int(yr_for_grad_optim[-1].item())
+    n_grad = len(D_for_grad_optim)
+    # anchor_indices: period boundaries as indices into D_for_grad_optim (index i = year grad_optim_start_yr + i)
+    anchor_indices = [
+        0 if y < grad_optim_start_yr else (n_grad if y > 1949 else y - grad_optim_start_yr)
+        for y in anchor_cal_years
+    ]
+    first_yr_included = grad_optim_start_yr
+    last_yr_included = 1949
     ui.write(f"**Deaths (late ancient → 1949)** first year included: **{first_yr_included}** · last year included: **{last_yr_included}**")
     ui.write(f"Shape: `{D_for_grad_optim.shape}` · First 3: `{D_for_grad_optim[:3].tolist()}` · Last 3: `{D_for_grad_optim[-3:].tolist()}`")
     relative_curvature_importance = ui.sidebar_slider(
@@ -345,34 +353,64 @@ def render() -> None:
         step=1,
         help="Number of gradient steps to take.",
     )
+    normalize_D = ui.sidebar_toggle(
+        "Normalize D (÷D_max) for grad optim",
+        value=True,
+        help="Normalize D to 0–1 before gradient steps for better conditioning.",
+    )
 
     # One torch optim step: loss = sum_j (desired_j - integral_j)^2
     lr = float(learning_rate)
     _deaths_tgt_t = torch.tensor(list(cumulated_D.values()), dtype=torch.float64)
 
-    D_param = D_for_grad_optim.detach().clone().requires_grad_(True)
+    D_max = D_for_grad_optim.max().item()
+
+    def _norm(D: torch.Tensor) -> torch.Tensor:
+        return D / D_max
+
+    def _denorm(D_norm: torch.Tensor) -> torch.Tensor:
+        return D_norm * D_max
+
+    d_2_before = D_all[yr_all == grad_optim_start_yr - 2].item()
+    d_1_before = D_all[yr_all == grad_optim_start_yr - 1].item()
+    d_1_after = D_all[yr_all == 1950].item()
+    d_2_after = D_all[yr_all == 1951].item()
+
+    if normalize_D:
+        _deaths_tgt_opt = _deaths_tgt_t / D_max
+        d_2_opt, d_1_opt_before, d_1_opt_after, d_2_opt_after = (
+            d_2_before / D_max, d_1_before / D_max, d_1_after / D_max, d_2_after / D_max
+        )
+        D_param = _norm(D_for_grad_optim).detach().clone().requires_grad_(True)
+    else:
+        _deaths_tgt_opt = _deaths_tgt_t
+        d_2_opt, d_1_opt_before, d_1_opt_after, d_2_opt_after = (
+            d_2_before, d_1_before, d_1_after, d_2_after
+        )
+        D_param = D_for_grad_optim.detach().clone().requires_grad_(True)
+
     optimizer = torch.optim.SGD([D_param], lr=lr)
     for _ in range(grad_steps):
         optimizer.zero_grad()
-        grad.compute_grad_optim_grads(D_param, yr_for_grad_optim, _deaths_tgt_t, anchor_years,
+        grad.compute_grad_optim_grads(D_param, _deaths_tgt_opt, anchor_indices,
         relative_curvature_importance=relative_curvature_importance,
-        d_year_2_before=D_all[yr_all == grad_optim_start_yr-2].item(),
-        d_year_1_before=D_all[yr_all == grad_optim_start_yr-1].item(),
-        d_year_1_after=D_all[yr_all == 1950].item(),
-        d_year_2_after=D_all[yr_all == 1951].item(),
+        d_year_2_before=d_2_opt,
+        d_year_1_before=d_1_opt_before,
+        d_year_1_after=d_1_opt_after,
+        d_year_2_after=d_2_opt_after,
         )
-
+        torch.nn.utils.clip_grad_norm_([D_param], max_norm=10.0)
         optimizer.step()
-    D_after_step = D_param.detach().clone()
+    D_after_step = _denorm(D_param.detach().clone()) if normalize_D else D_param.detach().clone()
 
     with torch.no_grad():
-        loss_before = grad.period_cumulative_deaths_loss(D_for_grad_optim, yr_for_grad_optim, _deaths_tgt_t, anchor_years).item()
-        loss_after  = grad.period_cumulative_deaths_loss(D_after_step,     yr_for_grad_optim, _deaths_tgt_t, anchor_years).item()
+        loss_before = grad.period_cumulative_deaths_loss(D_for_grad_optim, _deaths_tgt_t, anchor_indices).item()
+        loss_after  = grad.period_cumulative_deaths_loss(D_after_step,     _deaths_tgt_t, anchor_indices).item()
     max_abs_diff = (D_for_grad_optim - D_after_step).abs().max().item()
     ui.write(f"**Grad optim** loss Σ(desired−integral)² before step: `{loss_before:.6e}` → after one step: `{loss_after:.6e}`")
     ui.write(f"Max |before − after| per element: `{max_abs_diff:.6g}` (lr={lr:.6g})")
 
-    _yr_np = yr_for_grad_optim.cpu().numpy()
+    _yr_np = np.arange(first_yr_included, last_yr_included + 1, dtype=float)
     _D_np = D_for_grad_optim.cpu().numpy()
     _D_after_np = D_after_step.cpu().numpy()
 
@@ -421,15 +459,17 @@ def render() -> None:
     # Difference (after − before) so the step is visible despite scale
     delta_np = _D_after_np - _D_np
 
-    _sep_kwargs = dict(
-        d_year_2_before=D_all[yr_all == grad_optim_start_yr-2].item(),
-        d_year_1_before=D_all[yr_all == grad_optim_start_yr-1].item(),
-        d_year_1_after=D_all[yr_all == 1950].item(),
-        d_year_2_after=D_all[yr_all == 1951].item(),
+    _sep_kwargs_opt = dict(
+        d_year_2_before=d_2_opt,
+        d_year_1_before=d_1_opt_before,
+        d_year_1_after=d_1_opt_after,
+        d_year_2_after=d_2_opt_after,
     )
+    D_for_grads = (_norm(D_for_grad_optim) if normalize_D else D_for_grad_optim).detach().clone().requires_grad_(True)
+    _deaths_tgt_for_grads = _deaths_tgt_opt
     grad_integrals, grad_curvature = grad.compute_separate_grads(
-        D_for_grad_optim, yr_for_grad_optim, _deaths_tgt_t, anchor_years,
-        **_sep_kwargs,
+        D_for_grads, _deaths_tgt_for_grads, anchor_indices,
+        **_sep_kwargs_opt,
     )
     _x_delta = 2026.0 - _yr_np if log_x else _yr_np
     _cd = [_yfmt(int(y)) for y in _yr_np]
@@ -458,8 +498,40 @@ def render() -> None:
         return fig
 
     ui.plotly_chart(_delta_fig("Δ total (after − before)", delta_np, "#2ca02c"), width="stretch")
-    ui.plotly_chart(_delta_fig("−lr · ∇ integrals", -lr * grad_integrals, "#1f78b4"), width="stretch")
-    ui.plotly_chart(_delta_fig("−lr · ∇ curvature", -lr * grad_curvature, "#e6550d"), width="stretch")
+    grad_scale = D_max if normalize_D else 1.0
+    ui.plotly_chart(_delta_fig("−lr · ∇ integrals", -lr * grad_integrals * grad_scale, "#1f78b4"), width="stretch")
+    ui.plotly_chart(_delta_fig("−lr · ∇ curvature", -lr * grad_curvature * grad_scale, "#e6550d"), width="stretch")
+
+    # Curvature² for D array (before step)
+    curv2_before = grad.curvature_squared_array(
+        D_for_grad_optim,
+        d_year_2_before=d_2_before,
+        d_year_1_before=d_1_before,
+        d_year_1_after=d_1_after,
+        d_year_2_after=d_2_after,
+    ).cpu().numpy()
+    fig_curv2 = go.Figure()
+    fig_curv2.add_trace(go.Scatter(
+        x=_x_delta, y=curv2_before,
+        mode="lines",
+        line=dict(color="#6a3d9a", width=1.5),
+        customdata=_cd,
+        hovertemplate="%{customdata}  —  curvature² = %{y:.6g}<extra></extra>",
+        name="curvature² (before step)",
+    ))
+    fig_curv2.update_layout(
+        title="Curvature² of D (D″/D)²",
+        xaxis_title="Years before 2026 (log)" if log_x else "Year (−ve = BCE)",
+        yaxis_title="curvature²",
+        xaxis=dict(
+            type="log" if log_x else "linear",
+            autorange="reversed" if log_x else True,
+        ),
+        yaxis_type="log" if log_y else "linear",
+        margin=dict(t=40),
+        height=220,
+    )
+    ui.plotly_chart(fig_curv2, width="stretch")
 
     _owid_last_yr = _OWID_SERIES[-1][0]
     ref_yr  = np.arange(ancient_start, _owid_last_yr + 1)
