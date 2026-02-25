@@ -53,7 +53,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-# ── x-variable modes (labels for UI; fit.X_MODE_K_REF used inside fit) ──────────
+# ── OWID data ───────────────────────────────────────────────────────────────────
 
 # OWID actual deaths/yr (UN World Population Prospects 2024), 1950–2023
 _OWID_CSV_PATH = Path(__file__).parent / "owid_deaths.csv"
