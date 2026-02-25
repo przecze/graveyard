@@ -3,34 +3,10 @@
 # dependencies = ["numpy", "scipy", "plotly"]
 # ///
 """
-Deaths/yr model — piecewise constant-curvature basis.
-
-For n consecutive periods defined by the anchor years in data.json we fit:
-  - 3-parameter segments: a * sinh(b * (u - u0))
-  - 4-parameter segments: a * sinh(b * (u - u0)) + c * cosh(b * (u - u0))
-
-Constraints:
-  n   integral constraints : ∫ D_j dt = cumulative_deaths[j]
-  n−1 C0 seam continuity   : D_{j−1}(seam) = D_j(seam)
-  n−1 C1 seam continuity   : D′_{j−1}(seam) = D′_j(seam)
-  6   endpoint constraints : D, D′, D″ at both edges
-
-The code checks parameter count vs constraint count before fitting so the
-system is fully determined.
-
-Period cumulative death constraints are derived from per-period births and
-population carry-over:
-
-    cumulative_deaths[j] = cumulative_births[end_j] - pop[end_j] + pop[start_j]
-
-with a special-case baseline pop[start_j] = 0 when end_j is -8_000.
-
 Always run this module via `uv run`.
 Standalone : uv run death_model.py
 
 Important instruction for coding assistant: run this module as standalone after EVERY CHANGE as a test!!!
-
-Streamlit  : import death_model; death_model.render()
 """
 
 from __future__ import annotations
@@ -355,7 +331,8 @@ def render() -> None:
         ui.dataframe(edge_rows, width="stretch")
 
     # Analytic flat ancient segment (included in plotting, excluded from fit).
-    flat_yr = np.arange(ancient_start, fit_ancient_start + 1)
+    # Half-open convention: flat covers [ancient_start, fit_ancient_start).
+    flat_yr = np.arange(ancient_start, fit_ancient_start)
     flat_age = flat_yr - ancient_start
     flat_D = 2.0 * np.pi * density * flat_age
 
@@ -363,11 +340,13 @@ def render() -> None:
 
     fit_start_t = ancient_flat_length
     fit_end_t = total_years - 1
-    yr_model_fit = np.arange(fit_ancient_start + 1, anchor_cal_years[-1] + 1)
-    D_model_init_fit = D_init[fit_start_t + 1 : fit_end_t + 1]
-    D_model_fit = D_fitted[fit_start_t + 1 : fit_end_t + 1]
+    # Half-open convention: fitted model covers [fit_ancient_start, anchor_cal_years[-1]).
+    # anchor_cal_years[-1] = 1950 is the pinned endpoint but is handed off to OWID.
+    yr_model_fit = np.arange(fit_ancient_start, anchor_cal_years[-1])
+    D_model_init_fit = D_init[fit_start_t : fit_end_t]
+    D_model_fit = D_fitted[fit_start_t : fit_end_t]
 
-    # OWID extension arrays (smoothed; 1950 included for a seamless join with the model)
+    # OWID extension arrays (smoothed; 1950 is now the first OWID year for seamless join)
     if owid_smooth_window >= 1:
         _owid_sm = _owid_smoothed(window=owid_smooth_window)
     else:
@@ -376,12 +355,12 @@ def render() -> None:
     _owid_D  = np.array([float(d) for _, d in _OWID_SERIES])
     _owid_D_plot = np.array([_owid_sm[int(y)] for y, _ in _OWID_SERIES])
 
-    # Build combined model + OWID series (OWID starts at 1951; 1950 already pinned in model)
+    # Build combined model + OWID series (model ends at 1949; OWID starts at 1950)
     yr_model = np.concatenate([flat_yr, yr_model_fit])
     D_model_init = np.concatenate([flat_D, D_model_init_fit])
     D_model = np.concatenate([flat_D, D_model_fit])
-    yr_owid_ext = np.array([y for y, _ in _OWID_SERIES if y > 1950])
-    D_owid_ext  = np.array([float(d) for y, d in _OWID_SERIES if y > 1950])
+    yr_owid_ext = np.array([y for y, _ in _OWID_SERIES if y >= 1950])
+    D_owid_ext  = np.array([float(d) for y, d in _OWID_SERIES if y >= 1950])
     yr_all = np.concatenate([yr_model, yr_owid_ext])
     D_all  = np.concatenate([D_model,  D_owid_ext])
 
@@ -400,14 +379,14 @@ def render() -> None:
         label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
         t_s = anchor_years[j] - ancient_start
         t_e = anchor_years[j + 1] - ancient_start
-        yr = np.arange(anchor_years[j] + 1, anchor_years[j + 1] + 1)
-        D_src = D_fitted[t_s + 1 : t_e + 1]
+        yr = np.arange(anchor_years[j], anchor_years[j + 1])
+        D_src = D_fitted[t_s : t_e]
         if len(yr) == 0:
             continue
         y_vals = np.maximum(D_src, 1e-6) if log_y else D_src
         x_vals = 2026.0 - yr if log_x else yr
         hover_yr = [_yfmt(int(round(y))) for y in yr]
-        D_src_init = D_init[t_s + 1 : t_e + 1]
+        D_src_init = D_init[t_s : t_e]
         fig_init.add_trace(go.Scatter(
             x=x_vals, y=(np.maximum(D_src_init, 1e-6) if log_y else D_src_init),
             mode="lines",
@@ -468,10 +447,111 @@ def render() -> None:
         margin=dict(t=40),
     )
 
+    # ── Derivatives (model only: flat + fitted, no post-1950 OWID) ────────────────
+    # yr_model / D_model already stop at 1950 and include the flat segment.
+    # Spacing is exactly 1 year throughout, so dt = 1.
+    dD1 = np.gradient(D_model, yr_model)  # 1st derivative
+
+    # 2nd derivative — symmetrical (central-difference) formula everywhere except at
+    # period-edge points, where one-sided formulas keep the stencil inside one period.
+    #
+    # Half-open convention: period j = [anchor_years[j], anchor_years[j+1]).
+    #   last year of period j  = anchor_years[j+1] - 1  → backward stencil
+    #   first year of period j = anchor_years[j]         → forward stencil
+    #
+    # Examples: seam between "1200→1650" and "1650→1750"
+    #   1649  (last  of "1200→1650") → backward: uses 1647, 1648, 1649
+    #   1650  (first of "1650→1750") → forward:  uses 1650, 1651, 1652
+    #
+    # "Last years" of each segment (= boundary - 1):
+    #   fit_ancient_start - 1          (last year of flat analytic segment)
+    #   anchor_years[1..n-1] - 1       (last years of all fitted periods except the final)
+    # "First years" of each segment (= anchor year itself):
+    #   fit_ancient_start              (first year of first fitted period)
+    #   anchor_years[1..n-1]           (first years of subsequent fitted periods)
+    _last_years_set: set[int] = {int(fit_ancient_start) - 1} | {
+        int(anchor_years[j + 1]) - 1 for j in range(n - 1)
+    }
+    _first_years_set: set[int] = {int(fit_ancient_start)} | {
+        int(anchor_years[j + 1]) for j in range(n - 1)
+    }
+    yr_model_int = yr_model.astype(int)
+    _at_last  = np.isin(yr_model_int, list(_last_years_set))   # last year of segment
+    _at_first = np.isin(yr_model_int, list(_first_years_set))  # first year of segment
+
+    N = len(D_model)
+    idx = np.arange(N)
+
+    d2D = np.empty_like(D_model)
+    # Default interior: central
+    d2D[1:-1] = D_model[2:] - 2.0 * D_model[1:-1] + D_model[:-2]
+    # Absolute endpoints (model start/end)
+    d2D[0]  = D_model[2]  - 2.0 * D_model[1]  + D_model[0]   # forward
+    d2D[-1] = D_model[-1] - 2.0 * D_model[-2] + D_model[-3]  # backward
+    # Last year of a segment → backward: D[i] - 2*D[i-1] + D[i-2]
+    bi = idx[_at_last & (idx >= 2)]
+    d2D[bi] = D_model[bi] - 2.0 * D_model[bi - 1] + D_model[bi - 2]
+    # First year of a segment → forward: D[i+2] - 2*D[i+1] + D[i]
+    fi = idx[_at_first & (idx + 2 < N)]
+    d2D[fi] = D_model[fi + 2] - 2.0 * D_model[fi + 1] + D_model[fi]
+
+    def _deriv_figure(d_vals: np.ndarray, title: str, yaxis_title: str) -> go.Figure:
+        fig_d = go.Figure()
+        # Flat segment
+        flat_mask_d = yr_model < fit_ancient_start
+        x_f = 2026.0 - yr_model[flat_mask_d] if log_x else yr_model[flat_mask_d]
+        fig_d.add_trace(go.Scatter(
+            x=x_f,
+            y=d_vals[flat_mask_d],
+            mode="lines",
+            line=dict(color="#222222", width=2.5),
+            name=f"{_yfmt(int(flat_yr[0]))} → {_yfmt(int(flat_yr[-1]))} (flat analytic)",
+            customdata=[_yfmt(int(y)) for y in yr_model[flat_mask_d]],
+            hovertemplate="%{customdata}  —  %{y:,.3g}<extra></extra>",
+        ))
+        # Fitted segments (same colour scheme as main plot)
+        for j in range(n):
+            seg_mask_d = (yr_model >= anchor_years[j]) & (yr_model < anchor_years[j + 1])
+            if not np.any(seg_mask_d):
+                continue
+            label = f"{_yfmt(anchor_years[j])} → {_yfmt(anchor_years[j + 1])}"
+            x_s = 2026.0 - yr_model[seg_mask_d] if log_x else yr_model[seg_mask_d]
+            fig_d.add_trace(go.Scatter(
+                x=x_s,
+                y=d_vals[seg_mask_d],
+                mode="lines",
+                line=dict(color=_COLOURS[j % len(_COLOURS)], width=2.5),
+                name=label,
+                customdata=[_yfmt(int(round(y))) for y in yr_model[seg_mask_d]],
+                hovertemplate="%{customdata}  —  %{y:,.3g}<extra></extra>",
+            ))
+        fig_d.update_layout(
+            title=title,
+            xaxis_title="Years before 2026 (log)" if log_x else "Year (−ve = BCE)",
+            yaxis_title=yaxis_title,
+            xaxis=dict(
+                type="log" if log_x else "linear",
+                autorange="reversed" if log_x else True,
+            ),
+            legend=dict(
+                x=0.01, y=0.99, xanchor="left", yanchor="top",
+            ) if not log_x else dict(
+                x=1.0, y=0.0, xanchor="right", yanchor="bottom",
+            ),
+            showlegend=show_legend,
+            margin=dict(t=40),
+        )
+        return fig_d
+
+    fig_d1 = _deriv_figure(dD1, "1st derivative  d(Deaths/yr)/dt", "d(D)/dt  [deaths/yr²]")
+    fig_d2 = _deriv_figure(d2D, "2nd derivative  d²(Deaths/yr)/dt²  (central; one-sided at period edges)", "d²(D)/dt²  [deaths/yr³]")
+
     # Fit-debug tabs.
     tab_rate, tab_cumul = ui.tabs(["deaths/yr", "cumulative deaths"])
     with tab_rate:
         ui.plotly_chart(fig_init, width="stretch")
+        ui.plotly_chart(fig_d1, width="stretch")
+        ui.plotly_chart(fig_d2, width="stretch")
 
     def _reconstruct_period_sum(
         years: np.ndarray, values: np.ndarray, start_year: int, end_year: int
@@ -520,7 +600,7 @@ def render() -> None:
     yr_all_plot = np.arange(int(np.ceil(yr_model[0])), int(_owid_last_yr) + 1)
     D_all_plot = np.interp(yr_all_plot, yr_all, D_all)
     for idx, yr in enumerate(yr_all_plot):
-        if yr > 1950 and int(yr) in _owid_sm:
+        if yr >= 1950 and int(yr) in _owid_sm:
             D_all_plot[idx] = _owid_sm[int(yr)]
 
     cumul_all = np.zeros_like(D_all_plot, dtype=float)
@@ -562,7 +642,7 @@ def render() -> None:
     ))
 
     for j in range(n):
-        seg_mask = ((yr_all_plot >= anchor_years[j] + 1) & (yr_all_plot <= anchor_years[j + 1]))
+        seg_mask = (yr_all_plot >= anchor_years[j]) & (yr_all_plot < anchor_years[j + 1])
         x_seg = 2026.0 - yr_all_plot[seg_mask] if log_x else yr_all_plot[seg_mask]
         if len(x_seg) == 0:
             continue
@@ -579,7 +659,7 @@ def render() -> None:
             hovertemplate="%{customdata}  —  %{y:,.0f}<extra></extra>",
         ))
 
-    seg_mask = yr_all_plot > 1950.0
+    seg_mask = yr_all_plot >= 1950.0
     x_seg = 2026.0 - yr_all_plot[seg_mask] if log_x else yr_all_plot[seg_mask]
     y_seg = np.maximum(cumul_all[seg_mask], 1e-6) if log_y else cumul_all[seg_mask]
     fig_cumul.add_trace(go.Scatter(
