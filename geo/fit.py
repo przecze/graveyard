@@ -19,16 +19,6 @@ import numpy as np
 _Z_CLIP = 150.0
 
 
-X_MODE_LABELS: dict[str, str] = {
-    "log_before_2026": "log(years before 2026)  [current]",
-    "year":            "bare year  (no log)",
-}
-X_MODE_K_REF: dict[str, float | None] = {
-    "log_before_2026": 2026.0,
-    "year":            None,
-}
-
-
 def _u_transform(year_arr: np.ndarray, logarithm_reference_year: float | None) -> np.ndarray:
     """Map year-count values to the fitting x-variable u.
 
@@ -38,13 +28,6 @@ def _u_transform(year_arr: np.ndarray, logarithm_reference_year: float | None) -
     if logarithm_reference_year is None:
         return year_arr.astype(float)
     return np.log(np.maximum(logarithm_reference_year - year_arr, 1e-9))
-
-
-def _du_dy(y: int, logarithm_reference_year: float | None) -> tuple[float, float]:
-    if logarithm_reference_year is None:
-        return 1.0, 0.0
-    rem = max(logarithm_reference_year - y, 1e-9)
-    return -1.0 / rem, -1.0 / (rem * rem)
 
 
 def _param_size_for_period(j: int, four_param_period_idx: set[int]) -> int:
@@ -347,37 +330,6 @@ def fit_piecewise_polynomial(
     return _fit_piecewise_constant_curvature(
         cumulated_D=cumulated_D,
         four_param_period_ids=quartic_period_ids,
-        total_years=total_years,
-        D_start=D_start,
-        D_end=D_end,
-        dDdy_start=dDdy_start,
-        d2Ddy2_start=d2Ddy2_start,
-        dDdy_end=dDdy_end,
-        d2Ddy2_end=d2Ddy2_end,
-        logarithm_reference_year=logarithm_reference_year,
-        init_edge_values=init_edge_values,
-        init_x0_t=init_x0_t,
-    )
-
-
-def solve_piecewise_polynomial(
-    cumulated_D: dict[tuple[int, int], float],
-    quartic_period_ids: list[int],
-    total_years: int,
-    D_start: float | None = None,
-    D_end: float | None = None,
-    dDdy_start: float | None = None,
-    d2Ddy2_start: float | None = None,
-    dDdy_end: float | None = None,
-    d2Ddy2_end: float | None = None,
-    logarithm_reference_year: float | None = None,
-    init_edge_values: list[tuple[float, float]] | None = None,
-    init_x0_t: float = 0.0,
-) -> dict:
-    """Compatibility wrapper around the constant-curvature init."""
-    return fit_piecewise_polynomial(
-        cumulated_D=cumulated_D,
-        quartic_period_ids=quartic_period_ids,
         total_years=total_years,
         D_start=D_start,
         D_end=D_end,
