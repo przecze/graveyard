@@ -297,21 +297,6 @@ def render() -> None:
     n_constraints = (3 * n_periods - 2) + n_endpoint_constraints
 
     logarithm_reference_year = None
-    if init_edge_values:
-        last_left, last_right = init_edge_values[-1]
-        ui.write("[debug] init-only mode: nonlinear fit disabled (run_solver=False)")
-        ui.write(
-            "[debug] prefit endpoints "
-            f"window={owid_smooth_window} "
-            f"owid_1950_target={D_1950:.3f} "
-            f"dDdy_1950={dDdy_1950:.3f} "
-            f"d2Ddy2_1950={d2Ddy2_1950:.3f}"
-        )
-        ui.write(
-            "[debug] prefit last init-edge "
-            f"period={_yfmt(anchor_cal_years[-2])}->{_yfmt(anchor_cal_years[-1])} "
-            f"left={last_left:.3f} right={last_right:.3f}"
-        )
 
     if run_solver:
         raise NotImplementedError("Nonlinear fitting is not implemented.")
@@ -349,6 +334,25 @@ def render() -> None:
         log_x = ui.toggle("Log X axis", value=False)
     with col_legend:
         show_legend = ui.toggle("Show legend", value=True)
+
+    with ui.expander("Edge targets vs initialized edge values", expanded=False):
+        edge_rows = []
+        for row in r.get("init_edge_report", []):
+            cal_s = int(row["start_t"]) + ancient_start
+            cal_e = int(row["end_t"]) + ancient_start
+            edge_rows.append({
+                "period": f"{_yfmt(cal_s)} → {_yfmt(cal_e)}",
+                "n_params": row["n_params"],
+                "target_left": row["target_left"],
+                "target_right": row["target_right"],
+                "init_left": row["init_left"],
+                "init_right": row["init_right"],
+                "err_left": row["err_left"],
+                "err_right": row["err_right"],
+                "init_min": row["init_min"],
+                "init_max": row["init_max"],
+            })
+        ui.dataframe(edge_rows, width="stretch")
 
     # Analytic flat ancient segment (included in plotting, excluded from fit).
     flat_yr = np.arange(ancient_start, fit_ancient_start + 1)
@@ -622,25 +626,6 @@ def render() -> None:
     with tab_cumul:
         ui.plotly_chart(fig_cumul, width="stretch")
         ui.dataframe(period_rows, width="stretch")
-
-    with ui.expander("Edge targets vs initialized edge values", expanded=False):
-        edge_rows = []
-        for row in r.get("init_edge_report", []):
-            cal_s = int(row["start_t"]) + ancient_start
-            cal_e = int(row["end_t"]) + ancient_start
-            edge_rows.append({
-                "period": f"{_yfmt(cal_s)} → {_yfmt(cal_e)}",
-                "n_params": row["n_params"],
-                "target_left": row["target_left"],
-                "target_right": row["target_right"],
-                "init_left": row["init_left"],
-                "init_right": row["init_right"],
-                "err_left": row["err_left"],
-                "err_right": row["err_right"],
-                "init_min": row["init_min"],
-                "init_max": row["init_max"],
-            })
-        ui.dataframe(edge_rows, width="stretch")
 
     if ui.IS_MAIN:
         return
