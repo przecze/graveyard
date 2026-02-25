@@ -170,6 +170,14 @@ def render() -> None:
         value=False,
         help="Off = initialization only (fast). On = run nonlinear least-squares fit.",
     )
+    init_multiplier = ui.sidebar_slider(
+        "Init edge multiplier",
+        min_value=0.1,
+        max_value=5.0,
+        value=1.09,
+        step=0.01,
+        help="Multiplier for init edge targets: pop * cbr/1000 * multiplier (first/last edges use fixed targets).",
+    )
     # Flat ancient segment is analytic (not fitted), then fit starts at
     # the post-flat ancient anchor and continues through the historical anchors.
     fit_ancient_start = ancient_start + ancient_flat_length
@@ -228,7 +236,7 @@ def render() -> None:
             cbr_edge = float(period_cbr[-1])
         else:
             cbr_edge = 0.5 * float(period_cbr[k - 1] + period_cbr[k])
-        edge_targets.append(cbr_edge / 1_000.0 * pop_edge)
+        edge_targets.append(cbr_edge / 1_000.0 * pop_edge * float(init_multiplier))
     # First fitted edge is synthetic (pop=0); use analytic-flat boundary instead.
     if edge_targets:
         edge_targets[0] = float(D_late_ancient_start)
@@ -491,6 +499,13 @@ def render() -> None:
         cumul_expected.append(cumul_expected[-1] + expected)
         cumul_reconstructed.append(cumul_reconstructed[-1] + reconstructed)
         cumul_years.append(cal_e)
+
+    period_rows.append({
+        "period": "Total",
+        "expected_deaths": cumul_expected[-1],
+        "reconstructed_deaths": cumul_reconstructed[-1],
+        "diff": cumul_reconstructed[-1] - cumul_expected[-1],
+    })
 
     def _hex_to_rgba(hex_colour: str, alpha: float) -> str:
         h = hex_colour.lstrip("#")
