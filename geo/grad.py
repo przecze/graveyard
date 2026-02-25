@@ -35,6 +35,7 @@ def curvature_squared_array(
     d_year_1_after: float,
     d_year_2_after: float,
     eps_frac: float = 0.1,
+    debug: bool = False,
 ) -> torch.Tensor:
     """Curvature² at each interior point: (D2/D)². Same shape as D.
     """
@@ -43,6 +44,7 @@ def curvature_squared_array(
         D,
         torch.tensor([d_year_1_after, d_year_2_after], dtype=D.dtype, device=D.device),
     ])
+    
     numeric_D2 = padded_D[2:] - 2 * padded_D[1:-1] + padded_D[:-2]
     curvature = numeric_D2 / padded_D[1:-1]
     return curvature.pow(2)
@@ -60,7 +62,7 @@ def total_curvature_squared_loss(
     curv = curvature_squared_array(
         D, d_year_2_before, d_year_1_before, d_year_1_after, d_year_2_after
     )
-    return curv[1:].sum()
+    return curv.sum()
 
 
 def compute_grad_optim_grads(
