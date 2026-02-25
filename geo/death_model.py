@@ -495,20 +495,21 @@ def render() -> None:
     fi = idx[_at_first & (idx + 2 < N)]
     d2D[fi] = D_model[fi + 2] - 2.0 * D_model[fi + 1] + D_model[fi]
 
-    def _deriv_figure(d_vals: np.ndarray, title: str, yaxis_title: str) -> go.Figure:
+    def _deriv_figure(d_vals: np.ndarray, title: str, yaxis_title: str, *, include_flat: bool = True) -> go.Figure:
         fig_d = go.Figure()
-        # Flat segment
-        flat_mask_d = yr_model < fit_ancient_start
-        x_f = 2026.0 - yr_model[flat_mask_d] if log_x else yr_model[flat_mask_d]
-        fig_d.add_trace(go.Scatter(
-            x=x_f,
-            y=d_vals[flat_mask_d],
-            mode="lines",
-            line=dict(color="#222222", width=2.5),
-            name=f"{_yfmt(int(flat_yr[0]))} → {_yfmt(int(flat_yr[-1]))} (flat analytic)",
-            customdata=[_yfmt(int(y)) for y in yr_model[flat_mask_d]],
-            hovertemplate="%{customdata}  —  %{y:,.3g}<extra></extra>",
-        ))
+        # Flat segment (optional; excluded for curvature/radius)
+        if include_flat:
+            flat_mask_d = yr_model < fit_ancient_start
+            x_f = 2026.0 - yr_model[flat_mask_d] if log_x else yr_model[flat_mask_d]
+            fig_d.add_trace(go.Scatter(
+                x=x_f,
+                y=d_vals[flat_mask_d],
+                mode="lines",
+                line=dict(color="#222222", width=2.5),
+                name=f"{_yfmt(int(flat_yr[0]))} → {_yfmt(int(flat_yr[-1]))} (flat analytic)",
+                customdata=[_yfmt(int(y)) for y in yr_model[flat_mask_d]],
+                hovertemplate="%{customdata}  —  %{y:,.3g}<extra></extra>",
+            ))
         # Fitted segments (same colour scheme as main plot)
         for j in range(n):
             seg_mask_d = (yr_model >= anchor_years[j]) & (yr_model < anchor_years[j + 1])
@@ -545,6 +546,14 @@ def render() -> None:
 
     fig_d1 = _deriv_figure(dD1, "1st derivative  d(Deaths/yr)/dt", "d(D)/dt  [deaths/yr²]")
     fig_d2 = _deriv_figure(d2D, "2nd derivative  d²(Deaths/yr)/dt²  (central; one-sided at period edges)", "d²(D)/dt²  [deaths/yr³]")
+    # Curvature D''/D (avoid div by zero)
+    D_safe = np.maximum(np.abs(D_model), 1e-9)
+    curvature = d2D / D_safe
+    fig_curv = _deriv_figure(curvature, "Curvature  D″/D", "D″/D  [1/yr²]", include_flat=False)
+    # Radius = 1/curvature (avoid div by zero)
+    curv_safe = np.maximum(np.abs(curvature), 1e-12)
+    radius = np.sign(curvature) / curv_safe
+    fig_radius = _deriv_figure(radius, "Radius  1/(D″/D)", "1/(D″/D)  [yr²]", include_flat=False)
 
     # Fit-debug tabs.
     tab_rate, tab_cumul = ui.tabs(["deaths/yr", "cumulative deaths"])
@@ -552,6 +561,8 @@ def render() -> None:
         ui.plotly_chart(fig_init, width="stretch")
         ui.plotly_chart(fig_d1, width="stretch")
         ui.plotly_chart(fig_d2, width="stretch")
+        ui.plotly_chart(fig_curv, width="stretch")
+        ui.plotly_chart(fig_radius, width="stretch")
 
     def _reconstruct_period_sum(
         years: np.ndarray, values: np.ndarray, start_year: int, end_year: int
