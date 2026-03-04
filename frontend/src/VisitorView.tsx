@@ -104,10 +104,12 @@ export default function VisitorView() {
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (
-        event.key === 'ArrowUp' ||
-        event.key === 'ArrowDown' ||
-        event.key === 'ArrowLeft' ||
-        event.key === 'ArrowRight'
+        event.key === 'ArrowUp' || event.key === 'ArrowDown' ||
+        event.key === 'ArrowLeft' || event.key === 'ArrowRight' ||
+        event.key === 'w' || event.key === 'a' ||
+        event.key === 's' || event.key === 'd' ||
+        event.key === 'h' || event.key === 'j' ||
+        event.key === 'k' || event.key === 'l'
       ) {
         keys.add(event.key);
         event.preventDefault();
@@ -118,13 +120,15 @@ export default function VisitorView() {
       keys.delete(event.key);
     };
 
+    const clearKeys = () => keys.clear();
+
     const update = (dt: number) => {
       let inputX = 0;
       let inputY = 0;
-      if (keys.has('ArrowLeft')) inputX -= 1;
-      if (keys.has('ArrowRight')) inputX += 1;
-      if (keys.has('ArrowUp')) inputY -= 1;
-      if (keys.has('ArrowDown')) inputY += 1;
+      if (keys.has('ArrowLeft') || keys.has('a') || keys.has('h')) inputX -= 1;
+      if (keys.has('ArrowRight') || keys.has('d') || keys.has('l')) inputX += 1;
+      if (keys.has('ArrowUp') || keys.has('w') || keys.has('k')) inputY -= 1;
+      if (keys.has('ArrowDown') || keys.has('s') || keys.has('j')) inputY += 1;
 
       const speedPxPerSec = speedYearsPerSecondRef.current * pixelsPerYearRef.current;
       const targetVX = inputX * speedPxPerSec;
@@ -176,7 +180,7 @@ export default function VisitorView() {
 
       ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
       ctx.font = '14px monospace';
-      ctx.fillText('Visitor view  -  move with arrow keys', 16, 28);
+      ctx.fillText('Visitor view  -  move with arrows / wasd / hjkl', 16, 28);
       ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
       const positionInYearsX = position.x / pixelsPerYearRef.current;
       const positionInYearsY = position.y / pixelsPerYearRef.current;
@@ -218,6 +222,8 @@ export default function VisitorView() {
     window.addEventListener('resize', resize);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', clearKeys);
+    document.addEventListener('visibilitychange', clearKeys);
     raf = window.requestAnimationFrame(tick);
 
     return () => {
@@ -225,6 +231,8 @@ export default function VisitorView() {
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', clearKeys);
+      document.removeEventListener('visibilitychange', clearKeys);
     };
   }, []);
 
