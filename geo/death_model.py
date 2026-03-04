@@ -22,8 +22,8 @@ ui.IS_MAIN = __name__ == "__main__"
 
 import fit
 
-_DOCKER_PATH = Path("/data/prb.json")
-_LOCAL_PATH  = Path(__file__).parent.parent / "data" / "prb.json"
+_DATA_PATH   = Path("/data/prb.json") if Path("/data/prb.json").exists() else Path(__file__).parent.parent / "data" / "prb.json"
+_OUTPUT_DIR  = Path("/output") if Path("/output").is_dir() else Path(__file__).parent.parent / "data" / "precomputed"
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -73,12 +73,9 @@ def _owid_endpoint_constraints(window: int = 5) -> tuple[float, float, float]:
 
 # ── data loading ───────────────────────────────────────────────────────────────
 
-def _load_data() -> tuple[dict, list[int]]:
-    path = _DOCKER_PATH if _DOCKER_PATH.exists() else _LOCAL_PATH
-    with open(path) as f:
-        raw = json.load(f)
-    data = {int(k): v for k, v in raw.items()}
-    return data
+def _load_data() -> dict:
+    with open(_DATA_PATH) as f:
+        return {int(k): v for k, v in json.load(f).items()}
 
 
 def _yfmt(y: int) -> str:
@@ -92,6 +89,38 @@ _COLOURS = [
     "#b15928", "#fb9a99", "#fdbf6f",
 ]
 
+
+
+# ── Output writer ───────────────────────────────────────────────────────────────
+
+def _fmt(v: float) -> str:
+    f = float(v)
+    if np.isinf(f):
+        return "Infinity"
+    f = f + 0.0  # eliminate -0.0
+    return f"{f:.2f}" if f != 0.0 else "0.00"
+
+
+def _write_outputs(
+    *,
+    ancient_start: int,
+    ancient_length: int,
+    radius: np.ndarray,
+    deaths: np.ndarray,
+    deaths_end_year: int,
+) -> None:
+    """Write radius, deaths, and info files to _OUTPUT_DIR.
+
+    Both arrays are indexed from 0 = ancient_start with 1-year steps.
+    """
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (_OUTPUT_DIR / "info.json").write_text(json.dumps({
+        "start_year":      ancient_start,
+        "ancient_length":  ancient_length,
+        "deaths_end_year": deaths_end_year,
+    }, indent=2))
+    (_OUTPUT_DIR / "radius.txt").write_text("\n".join(_fmt(v) for v in radius))
+    (_OUTPUT_DIR / "deaths.txt").write_text("\n".join(_fmt(v) for v in deaths))
 
 
 # ── Render (single computation flow) ────────────────────────────────────────────
@@ -553,7 +582,13 @@ def render() -> None:
     # Radius = 1/curvature (avoid div by zero)
     curv_safe = np.maximum(np.abs(curvature), 1e-12)
     radius = np.sign(curvature) / curv_safe
-    fig_radius = _deriv_figure(radius, "Radius  1/(D″/D)", "1/(D″/D)  [yr²]", include_flat=False)
+    # Flat analytic segment is exactly linear — force infinite radius regardless
+    # of floating-point noise in the second-derivative stencil.
+    radius[yr_model < fit_ancient_start] = np.inf
+    fig_radius = _deriv_figure(
+        np.where(np.isinf(radius), np.nan, radius),
+        "Radius  1/(D″/D)", "1/(D″/D)  [yr²]", include_flat=False,
+    )
 
     # Fit-debug tabs.
     tab_rate, tab_cumul = ui.tabs(["deaths/yr", "cumulative deaths"])
@@ -613,6 +648,14 @@ def render() -> None:
     for idx, yr in enumerate(yr_all_plot):
         if yr >= 1950 and int(yr) in _owid_sm:
             D_all_plot[idx] = _owid_sm[int(yr)]
+
+    _write_outputs(
+        ancient_start=int(ancient_start),
+        ancient_length=int(ancient_length),
+        radius=radius,
+        deaths=D_all_plot,
+        deaths_end_year=int(_owid_last_yr),
+    )
 
     cumul_all = np.zeros_like(D_all_plot, dtype=float)
     for i in range(1, len(D_all_plot)):

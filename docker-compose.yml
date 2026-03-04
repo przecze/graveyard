@@ -33,7 +33,7 @@ services:
     volumes:
       - ./geo:/app:ro
       - ./data/prb.json:/data/prb.json:ro
-      - ./frontend/src:/output
+      - ./data/precomputed:/output
     networks:
       - localnet
     restart: unless-stopped
