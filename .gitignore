@@ -12,6 +12,9 @@ frontend/npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# data
+data/precomputed/
+
 # Logs
 *.log
 logs/
