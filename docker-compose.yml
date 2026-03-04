@@ -32,7 +32,7 @@ services:
       --server.fileWatcherType=poll"
     volumes:
       - ./geo:/app:ro
-      - ./frontend/src/data.json:/data/data.json:ro
+      - ./data/prb.json:/data/prb.json:ro
       - ./frontend/src:/output
     networks:
       - localnet

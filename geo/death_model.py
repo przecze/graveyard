@@ -22,8 +22,8 @@ ui.IS_MAIN = __name__ == "__main__"
 
 import fit
 
-_DOCKER_PATH = Path("/data/data.json")
-_LOCAL_PATH  = Path(__file__).parent.parent / "frontend" / "src" / "data.json"
+_DOCKER_PATH = Path("/data/prb.json")
+_LOCAL_PATH  = Path(__file__).parent.parent / "data" / "prb.json"
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
