@@ -15,9 +15,23 @@ const MIN_TRAVEL_TIME_SECONDS = 30;
 const MAX_TRAVEL_TIME_SECONDS = 5 * 60 * 60;
 const DEFAULT_VIEWPORT_WIDTH_YEARS = 6;
 const MIN_VIEWPORT_WIDTH_YEARS = 1;
-const MAX_VIEWPORT_WIDTH_YEARS = 20;
+const MAX_VIEWPORT_WIDTH_YEARS = 10000;
+const MAX_CIRCULAR_R = 5000;
 const ACCELERATION = 7;
 const DAMPING = 9;
+
+const VIEWPORT_LOG_MIN = Math.log10(MIN_VIEWPORT_WIDTH_YEARS);
+const VIEWPORT_LOG_MAX = Math.log10(MAX_VIEWPORT_WIDTH_YEARS);
+const viewportToSlider = (v: number) =>
+  ((Math.log10(v) - VIEWPORT_LOG_MIN) / (VIEWPORT_LOG_MAX - VIEWPORT_LOG_MIN)) * 1000;
+const sliderToViewport = (v: number) =>
+  Math.pow(10, VIEWPORT_LOG_MIN + (v / 1000) * (VIEWPORT_LOG_MAX - VIEWPORT_LOG_MIN));
+
+function fmtViewportYears(y: number): string {
+  if (y >= 1000) return `${Math.round(y).toLocaleString()} yr`;
+  if (y >= 10) return `${Math.round(y)} yr`;
+  return `${y.toFixed(1)} yr`;
+}
 
 function shouldDrawGrave(gridX: number, gridY: number): boolean {
   return gridX % 3 !== 0 && gridY % 5 !== 0;
@@ -47,15 +61,19 @@ export default function VisitorView() {
   const [travelTimeSeconds, setTravelTimeSeconds] = useState(DEFAULT_TRAVEL_TIME_SECONDS);
   const [graveDensity, setGraveDensity] = useState(DEFAULT_GRAVE_DENSITY);
   const [viewportWidthYears, setViewportWidthYears] = useState(DEFAULT_VIEWPORT_WIDTH_YEARS);
+  const [circularMode, setCircularMode] = useState(false);
   const [screenSize, setScreenSize] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
   }));
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const speedYearsPerSecondRef = useRef(TRAVEL_DISTANCE_YEARS / DEFAULT_TRAVEL_TIME_SECONDS);
   const graveDensityRef = useRef(graveDensity);
   const pixelsPerYearRef = useRef(pixelsPerYearForDensity(graveDensity));
   const viewportWidthYearsRef = useRef(viewportWidthYears);
+  const circularModeRef = useRef(false);
+  const resetPositionRef = useRef(false);
 
   useEffect(() => {
     speedYearsPerSecondRef.current = TRAVEL_DISTANCE_YEARS / Math.max(travelTimeSeconds, 0.0001);
@@ -69,6 +87,10 @@ export default function VisitorView() {
   useEffect(() => {
     viewportWidthYearsRef.current = viewportWidthYears;
   }, [viewportWidthYears]);
+
+  useEffect(() => {
+    circularModeRef.current = circularMode;
+  }, [circularMode]);
 
   useEffect(() => {
     const onResize = () => {
@@ -123,6 +145,14 @@ export default function VisitorView() {
     const clearKeys = () => keys.clear();
 
     const update = (dt: number) => {
+      if (resetPositionRef.current) {
+        position.x = 0;
+        position.y = 0;
+        velocity.x = 0;
+        velocity.y = 0;
+        resetPositionRef.current = false;
+      }
+
       let inputX = 0;
       let inputY = 0;
       if (keys.has('ArrowLeft') || keys.has('a') || keys.has('h')) inputX -= 1;
@@ -145,6 +175,104 @@ export default function VisitorView() {
       position.y += velocity.y * dt;
     };
 
+    const drawGrid = (
+      width: number, height: number,
+      worldLeftScaled: number, worldTop: number,
+      worldPxPerScreenPx: number,
+    ) => {
+      const worldRight = worldLeftScaled + width * worldPxPerScreenPx;
+      const worldBottom = worldTop + height * worldPxPerScreenPx;
+      const startX = Math.floor(worldLeftScaled / GRID_SPACING) - 1;
+      const endX = Math.ceil(worldRight / GRID_SPACING) + 1;
+      const startY = Math.floor(worldTop / GRID_SPACING) - 1;
+      const endY = Math.ceil(worldBottom / GRID_SPACING) + 1;
+      const dotR = GRAVE_RADIUS / worldPxPerScreenPx;
+
+      ctx.fillStyle = '#7ad9ff';
+      for (let gy = startY; gy <= endY; gy++) {
+        for (let gx = startX; gx <= endX; gx++) {
+          if (!shouldDrawGrave(gx, gy)) continue;
+          const sx = (gx * GRID_SPACING - worldLeftScaled) / worldPxPerScreenPx;
+          const sy = (gy * GRID_SPACING - worldTop) / worldPxPerScreenPx;
+          ctx.beginPath();
+          ctx.arc(sx, sy, dotR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    };
+
+    const drawCircular = (
+      width: number, height: number,
+      worldLeftScaled: number, worldTop: number,
+      worldRight: number, worldBottom: number,
+      worldPxPerScreenPx: number,
+    ) => {
+      const ppy = pixelsPerYearRef.current;
+
+      const closestX = Math.max(worldLeftScaled, Math.min(0, worldRight));
+      const closestY = Math.max(worldTop, Math.min(0, worldBottom));
+      const rMinPx = Math.hypot(closestX, closestY);
+      const rMaxPx = Math.max(
+        Math.hypot(worldLeftScaled, worldTop),
+        Math.hypot(worldRight, worldTop),
+        Math.hypot(worldRight, worldBottom),
+        Math.hypot(worldLeftScaled, worldBottom),
+      );
+
+      const rMinYears = Math.max(1, Math.floor(rMinPx / ppy));
+      const rMaxYears = Math.min(MAX_CIRCULAR_R, Math.ceil(rMaxPx / ppy));
+      const originInViewport = closestX === 0 && closestY === 0;
+      const thetaCenter = Math.atan2(position.y, position.x);
+      const dotR = GRAVE_RADIUS / worldPxPerScreenPx;
+
+      ctx.fillStyle = '#7ad9ff';
+      for (let r = rMinYears; r <= rMaxYears; r++) {
+        if (r % 3 === 0) continue;
+
+        const rSlots = r * 6;
+        let fStart = 0;
+        let fEnd = rSlots - 1;
+
+        if (!originInViewport) {
+          const vpCorners: [number, number][] = [
+            [worldLeftScaled, worldTop],
+            [worldRight, worldTop],
+            [worldRight, worldBottom],
+            [worldLeftScaled, worldBottom],
+          ];
+          let minDelta = Infinity, maxDelta = -Infinity;
+          for (const [cx, cy] of vpCorners) {
+            let delta = Math.atan2(cy, cx) - thetaCenter;
+            while (delta > Math.PI) delta -= 2 * Math.PI;
+            while (delta < -Math.PI) delta += 2 * Math.PI;
+            if (delta < minDelta) minDelta = delta;
+            if (delta > maxDelta) maxDelta = delta;
+          }
+          const thetaMin = thetaCenter + minDelta;
+          const thetaMax = thetaCenter + maxDelta;
+          fStart = Math.floor((thetaMin * rSlots) / (2 * Math.PI)) - 1;
+          fEnd = Math.min(
+            Math.ceil((thetaMax * rSlots) / (2 * Math.PI)) + 1,
+            fStart + rSlots - 1,
+          );
+        }
+
+        for (let fi = fStart; fi <= fEnd; fi++) {
+          const f = ((fi % rSlots) + rSlots) % rSlots;
+          if (f % 4 === 0) continue;
+          const theta = (2 * Math.PI * fi) / rSlots;
+          const wx = r * ppy * Math.cos(theta);
+          const wy = r * ppy * Math.sin(theta);
+          const sx = (wx - worldLeftScaled) / worldPxPerScreenPx;
+          const sy = (wy - worldTop) / worldPxPerScreenPx;
+          if (sx < -dotR || sx > width + dotR || sy < -dotR || sy > height + dotR) continue;
+          ctx.beginPath();
+          ctx.arc(sx, sy, dotR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    };
+
     const draw = () => {
       const width = window.innerWidth;
       const height = window.innerHeight;
@@ -161,26 +289,16 @@ export default function VisitorView() {
       const worldRight = position.x + worldHalfW;
       const worldBottom = position.y + worldHalfH;
 
-      const startX = Math.floor(worldLeftScaled / GRID_SPACING) - 1;
-      const endX = Math.ceil(worldRight / GRID_SPACING) + 1;
-      const startY = Math.floor(worldTop / GRID_SPACING) - 1;
-      const endY = Math.ceil(worldBottom / GRID_SPACING) + 1;
-
-      ctx.fillStyle = '#7ad9ff';
-      for (let gy = startY; gy <= endY; gy++) {
-        for (let gx = startX; gx <= endX; gx++) {
-          if (!shouldDrawGrave(gx, gy)) continue;
-          const sx = (gx * GRID_SPACING - worldLeftScaled) / worldPxPerScreenPx;
-          const sy = (gy * GRID_SPACING - worldTop) / worldPxPerScreenPx;
-          ctx.beginPath();
-          ctx.arc(sx, sy, GRAVE_RADIUS / worldPxPerScreenPx, 0, Math.PI * 2);
-          ctx.fill();
-        }
+      if (circularModeRef.current) {
+        drawCircular(width, height, worldLeftScaled, worldTop, worldRight, worldBottom, worldPxPerScreenPx);
+      } else {
+        drawGrid(width, height, worldLeftScaled, worldTop, worldPxPerScreenPx);
       }
 
       ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
       ctx.font = '14px monospace';
-      ctx.fillText('Visitor view  -  move with arrows / wasd / hjkl', 16, 28);
+      const modeLabel = circularModeRef.current ? 'Circular plan' : 'Visitor view';
+      ctx.fillText(`${modeLabel}  —  move with arrows / wasd / hjkl`, 16, 28);
       ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
       const positionInYearsX = position.x / pixelsPerYearRef.current;
       const positionInYearsY = position.y / pixelsPerYearRef.current;
@@ -189,8 +307,13 @@ export default function VisitorView() {
         16,
         50,
       );
-      ctx.fillText(`speed: ${speedYearsPerSecondRef.current.toFixed(2)} years/s`, 16, 72);
-      ctx.fillText(`grave density: ${graveDensityRef.current.toFixed(1)} graves/yr^2`, 16, 94);
+      if (!circularModeRef.current) {
+        ctx.fillText(`speed: ${speedYearsPerSecondRef.current.toFixed(2)} years/s`, 16, 72);
+        ctx.fillText(`grave density: ${graveDensityRef.current.toFixed(1)} graves/yr²`, 16, 94);
+      } else {
+        const distYears = Math.hypot(positionInYearsX, positionInYearsY);
+        ctx.fillText(`r from origin: ${distYears.toFixed(2)} years`, 16, 72);
+      }
 
       const yearPixels = width / viewportWidthYearsRef.current;
       const rulerLeft = 16;
@@ -244,6 +367,13 @@ export default function VisitorView() {
   const gravesInViewport = graveDensity * viewportAreaYearsSq;
   const gravesPassedPerSecond = gravesInViewport / Math.max(viewportTraverseSeconds, 0.0001);
 
+  const handleToggleMode = () => {
+    setCircularMode(m => {
+      if (!m) resetPositionRef.current = true;
+      return !m;
+    });
+  };
+
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative', overflow: 'hidden' }}>
       <canvas ref={canvasRef} />
@@ -265,49 +395,71 @@ export default function VisitorView() {
           minWidth: 220,
         }}
       >
-        <div style={{ color: '#bfe7ff' }}>
-          Calculated speed: {speedYearsPerSecond.toFixed(2)} years/s
-        </div>
-        <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
-          Viewport traverse time: {formatDuration(viewportTraverseSeconds)}
-        </div>
-        <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
-          Graves in viewport: {formatNumber(gravesInViewport)}
-        </div>
-        <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
-          Graves passed per second: {formatNumber(gravesPassedPerSecond)}
-        </div>
+        <button
+          onClick={handleToggleMode}
+          style={{
+            background: circularMode ? 'rgba(122, 217, 255, 0.2)' : 'rgba(255,255,255,0.08)',
+            border: `1px solid ${circularMode ? 'rgba(122, 217, 255, 0.6)' : 'rgba(255,255,255,0.25)'}`,
+            borderRadius: 4,
+            color: circularMode ? '#7ad9ff' : '#ccc',
+            cursor: 'pointer',
+            fontFamily: 'monospace',
+            fontSize: 12,
+            padding: '4px 8px',
+            textAlign: 'left',
+          }}
+        >
+          {circularMode ? '◉ Circular plan' : '○ Visitor view'}
+        </button>
+
+        {!circularMode && (
+          <>
+            <div style={{ color: '#bfe7ff' }}>
+              Calculated speed: {speedYearsPerSecond.toFixed(2)} years/s
+            </div>
+            <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
+              Viewport traverse time: {formatDuration(viewportTraverseSeconds)}
+            </div>
+            <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
+              Graves in viewport: {formatNumber(gravesInViewport)}
+            </div>
+            <div style={{ color: 'rgba(220, 220, 220, 0.92)' }}>
+              Graves passed per second: {formatNumber(gravesPassedPerSecond)}
+            </div>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span>16k years travel time: {formatDuration(travelTimeSeconds)}</span>
+              <input
+                type="range"
+                min={MIN_TRAVEL_TIME_SECONDS}
+                max={MAX_TRAVEL_TIME_SECONDS}
+                step={30}
+                value={travelTimeSeconds}
+                onChange={event => setTravelTimeSeconds(Number(event.target.value))}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span>Grave density: {graveDensity.toFixed(1)} graves/yr²</span>
+              <input
+                type="range"
+                min={MIN_GRAVE_DENSITY}
+                max={MAX_GRAVE_DENSITY}
+                step={1}
+                value={graveDensity}
+                onChange={event => setGraveDensity(Number(event.target.value))}
+              />
+            </label>
+          </>
+        )}
+
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span>16k years travel time: {formatDuration(travelTimeSeconds)}</span>
+          <span>Viewport width: {fmtViewportYears(viewportWidthYears)}</span>
           <input
             type="range"
-            min={MIN_TRAVEL_TIME_SECONDS}
-            max={MAX_TRAVEL_TIME_SECONDS}
-            step={30}
-            value={travelTimeSeconds}
-            onChange={event => setTravelTimeSeconds(Number(event.target.value))}
-          />
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span>Grave density: {graveDensity.toFixed(1)} graves/yr^2</span>
-          <input
-            type="range"
-            min={MIN_GRAVE_DENSITY}
-            max={MAX_GRAVE_DENSITY}
+            min={0}
+            max={1000}
             step={1}
-            value={graveDensity}
-            onChange={event => setGraveDensity(Number(event.target.value))}
-          />
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span>Viewport width: {viewportWidthYears.toFixed(1)} years</span>
-          <input
-            type="range"
-            min={MIN_VIEWPORT_WIDTH_YEARS}
-            max={MAX_VIEWPORT_WIDTH_YEARS}
-            step={0.1}
-            value={viewportWidthYears}
-            onChange={event => setViewportWidthYears(Number(event.target.value))}
+            value={viewportToSlider(viewportWidthYears)}
+            onChange={event => setViewportWidthYears(sliderToViewport(Number(event.target.value)))}
           />
         </label>
       </div>
