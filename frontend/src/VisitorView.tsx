@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import AboutDialog from './AboutDialog';
 
 type Vec2 = { x: number; y: number };
 
@@ -62,6 +63,7 @@ export default function VisitorView() {
   const [graveDensity, setGraveDensity] = useState(DEFAULT_GRAVE_DENSITY);
   const [viewportWidthYears, setViewportWidthYears] = useState(DEFAULT_VIEWPORT_WIDTH_YEARS);
   const [circularMode, setCircularMode] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [screenSize, setScreenSize] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -125,6 +127,7 @@ export default function VisitorView() {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (
         event.key === 'ArrowUp' || event.key === 'ArrowDown' ||
         event.key === 'ArrowLeft' || event.key === 'ArrowRight' ||
@@ -376,6 +379,7 @@ export default function VisitorView() {
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative', overflow: 'hidden' }}>
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       <canvas ref={canvasRef} />
       <div
         style={{
@@ -395,6 +399,23 @@ export default function VisitorView() {
           minWidth: 220,
         }}
       >
+        <button
+          onClick={() => setShowAbout(true)}
+          style={{
+            background: 'rgba(255,255,255,0.06)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            borderRadius: 4,
+            color: '#bbb',
+            cursor: 'pointer',
+            fontFamily: 'monospace',
+            fontSize: 12,
+            padding: '4px 8px',
+            textAlign: 'left',
+          }}
+        >
+          About
+        </button>
+
         <button
           onClick={handleToggleMode}
           style={{
