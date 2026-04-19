@@ -87,6 +87,7 @@ Exact positions of 100B graves are not stored in any DB, they are generated on t
 * The Frontier of Light - represent whole humanity here, not only the dead
   * What if instead of grave, we have candles. For dead people already put down, but for the living 9B individuals there are many alight candles at the edge. Close to edge you see some candles being alight (some people born in early 20th century are still alive) and at the edge and beyond its (almost) only light. You see candles going off based on death rates. You see new candles appear at the edge based on birth rates
 * Visited by N players before / Last visited - this feature might be implementable without a huge database if we do it on the chunk level. Then players can see if they are taking a new path through the space and seeing the graves noone has seen before. Just increment count for the chunk id every time a player enters
+* Maybe make surface proportional to population not deaths - this way in periods when the death rate increases(black death, wars) the density will be higher, and in modern period it will also become generally lower. I think that might be a nice visual but complicates math
 # About the author
 [janczechowski.com](https://janczechowski.com)
 
