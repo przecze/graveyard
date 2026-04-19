@@ -36,9 +36,24 @@ def sidebar_toggle(label, *, value=False, help=""):
     if IS_MAIN: return value
     return st.sidebar.toggle(label, value=value, help=help)
 
+def sidebar_button(label, *, help=""):
+    if IS_MAIN: return True
+    return st.sidebar.button(label, help=help)
+
 def spinner(msg):
     if IS_MAIN: return contextlib.nullcontext()
     return st.spinner(msg)
+
+@contextlib.contextmanager
+def solver_status(title: str):
+    """Yields a log(msg) callable. CLI: prints. Streamlit: writes inside st.status."""
+    if IS_MAIN:
+        print(f"[{title}]")
+        yield lambda msg: print(f"  {msg}")
+        return
+    with st.status(title, expanded=True) as _s:
+        yield lambda msg: st.write(msg)
+        _s.update(state="complete")
 
 def warning(msg):
     if IS_MAIN: print(f"[warning] {msg}"); return

@@ -1,18 +1,20 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["numpy"]
+# dependencies = ["numpy", "scipy"]
 # ///
 """
-Piecewise constant-curvature initialization for deaths/yr.
+Piecewise constant-curvature fit for deaths/yr.
 
 Each period is either:
   - 3-parameter: a * exp(c * x) + b * exp(-c * x)
   - 4-parameter: a * exp(c * x) + b * exp(-d * x)
 
-No UI dependencies. Used by death_model. Fitting (nonlinear solve) is not implemented.
+No UI dependencies. Used by death_model.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import numpy as np
 
@@ -20,11 +22,7 @@ _Z_CLIP = 150.0
 
 
 def _u_transform(year_arr: np.ndarray, logarithm_reference_year: float | None) -> np.ndarray:
-    """Map year-count values to the fitting x-variable u.
-
-    logarithm_reference_year is None : u = t  (identity).
-    logarithm_reference_year is float: u = ln(ref − t), clamped to 1e-9.
-    """
+    """u = t (identity) when logarithm_reference_year is None, else u = ln(ref − t)."""
     if logarithm_reference_year is None:
         return year_arr.astype(float)
     return np.log(np.maximum(logarithm_reference_year - year_arr, 1e-9))
@@ -37,41 +35,35 @@ def _param_size_for_period(j: int, four_param_period_idx: set[int]) -> int:
 def _unpack_period_params(theta_vec: np.ndarray, sl: slice, n_params: int) -> tuple[float, float, float, float]:
     p = theta_vec[sl]
     if n_params == 3:
-        # 3 params: [a, b, log_c], with d == c.
         a, b_amp, log_c = float(p[0]), float(p[1]), float(p[2])
         log_d = log_c
     else:
-        # 4 params: [a, b, log_c, log_d]
         a, b_amp, log_c, log_d = float(p[0]), float(p[1]), float(p[2]), float(p[3])
     log_c = float(np.clip(log_c, -16.0, 2.0))
     log_d = float(np.clip(log_d, -16.0, 2.0))
-    c = float(np.exp(log_c))
-    d = float(np.exp(log_d))
-    return a, b_amp, c, d
+    return a, b_amp, float(np.exp(log_c)), float(np.exp(log_d))
 
 
 def _D_period(theta_vec: np.ndarray, sl: slice, n_params: int, u: np.ndarray | float) -> np.ndarray | float:
     a, b_amp, c, d = _unpack_period_params(theta_vec, sl, n_params)
-    z_pos = np.clip(c * u, -_Z_CLIP, _Z_CLIP)
-    z_neg = np.clip(-d * u, -_Z_CLIP, _Z_CLIP)
-    return a * np.exp(z_pos) + b_amp * np.exp(z_neg)
+    return a * np.exp(np.clip(c * u, -_Z_CLIP, _Z_CLIP)) + b_amp * np.exp(np.clip(-d * u, -_Z_CLIP, _Z_CLIP))
 
 
 def _dDdu_period(theta_vec: np.ndarray, sl: slice, n_params: int, u: np.ndarray | float) -> np.ndarray | float:
     a, b_amp, c, d = _unpack_period_params(theta_vec, sl, n_params)
-    z_pos = np.clip(c * u, -_Z_CLIP, _Z_CLIP)
-    z_neg = np.clip(-d * u, -_Z_CLIP, _Z_CLIP)
-    return a * c * np.exp(z_pos) - b_amp * d * np.exp(z_neg)
+    return a * c * np.exp(np.clip(c * u, -_Z_CLIP, _Z_CLIP)) - b_amp * d * np.exp(np.clip(-d * u, -_Z_CLIP, _Z_CLIP))
 
 
 def _d2Ddu2_period(theta_vec: np.ndarray, sl: slice, n_params: int, u: np.ndarray | float) -> np.ndarray | float:
     a, b_amp, c, d = _unpack_period_params(theta_vec, sl, n_params)
-    z_pos = np.clip(c * u, -_Z_CLIP, _Z_CLIP)
-    z_neg = np.clip(-d * u, -_Z_CLIP, _Z_CLIP)
-    return a * (c ** 2) * np.exp(z_pos) + b_amp * (d ** 2) * np.exp(z_neg)
+    return (a * (c ** 2) * np.exp(np.clip(c * u, -_Z_CLIP, _Z_CLIP))
+            + b_amp * (d ** 2) * np.exp(np.clip(-d * u, -_Z_CLIP, _Z_CLIP)))
 
 
-def _fit_piecewise_constant_curvature(
+_PROGRESS_LOG_EVERY = 50
+
+
+def fit_piecewise_constant_curvature(
     cumulated_D: dict[tuple[int, int], float],
     four_param_period_ids: list[int],
     total_years: int,
@@ -83,7 +75,9 @@ def _fit_piecewise_constant_curvature(
     d2Ddy2_end: float | None = None,
     logarithm_reference_year: float | None = None,
     init_edge_values: list[tuple[float, float]] | None = None,
-    init_x0_t: float = 0.0,
+    run_solver: bool = True,
+    max_nfev: int = 500,
+    progress_callback: Callable[[int, float], None] | None = None,
 ) -> dict:
     anchor_years = sorted({t for pair in cumulated_D for t in pair})
     n = len(anchor_years) - 1
@@ -109,33 +103,20 @@ def _fit_piecewise_constant_curvature(
         dtype=float,
     )
     for j in range(n):
-        # Discrete period "integral": include first year, exclude last year.
-        # Example: 1200→1650 uses years 1200..1649.
+        # Half-open: include first year, exclude last year. Example: 1200→1650 uses 1200..1649.
         yr_j = np.arange(anchor_years[j], anchor_years[j + 1], dtype=int)
         t_j = yr_j - t0
         u_j = _u_transform(yr_j, logarithm_reference_year)
         period_grids.append((t_j, u_j))
 
-    n_extra = (
-        (1 if D_start is not None else 0)
-        + (1 if D_end is not None else 0)
-        + (1 if dDdy_start is not None else 0)
-        + (1 if d2Ddy2_start is not None else 0)
-        + (1 if dDdy_end is not None else 0)
-        + (1 if d2Ddy2_end is not None else 0)
-    )
-    # Constraints:
-    #   n period integrals
-    #   (n-1) C0 seam equalities
-    #   (n-1) C1 seam equalities
-    #   + endpoint constraints
+    n_extra = sum(v is not None for v in [D_start, D_end, dDdy_start, d2Ddy2_start, dDdy_end, d2Ddy2_end])
+    # n period integrals + (n-1) C0 seams + (n-1) C1 seams + endpoint constraints
     n_constr = n + (n - 1) + (n - 1) + n_extra
 
     def _sl(j: int) -> slice:
         return slice(int(period_offsets[j]), int(period_offsets[j + 1]))
 
-    # Numerical stabilization: evaluate each period in local u-coordinates
-    # (u_rel = u_abs - u_ref_j) to avoid huge exponent arguments/amplitudes.
+    # Evaluate each period in local u-coordinates to avoid huge exponent arguments.
     period_u_ref = np.array([float(u_bnd[j]) for j in range(n)], dtype=float)
 
     def _u_rel(j: int, u_abs: np.ndarray | float) -> np.ndarray:
@@ -161,7 +142,6 @@ def _fit_piecewise_constant_curvature(
 
     def _init_theta(log_b_init: float) -> np.ndarray:
         theta0 = np.zeros(n_params, dtype=float)
-
         for j in range(n):
             sl = _sl(j)
             n_p = int(period_param_size[j])
@@ -170,14 +150,12 @@ def _fit_piecewise_constant_curvature(
             k0 = float(np.exp(log_b_init))
             u_rel_j = _u_rel(j, u_j)
             max_x = max(float(np.max(np.abs(u_rel_j))), 1e-9)
-            # Keep initialization rates inside runtime clip range to avoid
-            # flatlined exp terms on large absolute-u periods.
+            # Cap rates to keep exp terms within clip range on large-u periods.
             k_cap = max(1e-9, min(np.exp(2.0), (_Z_CLIP - 1.0) / max_x))
             k0 = min(k0, k_cap)
-            # Initialize from exact boundary coordinates so edge targets map correctly.
             x_left = 0.0
             x_right = float(u_bnd[j + 1] - u_bnd[j])
-            D_left_tgt, D_right_tgt = (mean_level, mean_level)
+            D_left_tgt, D_right_tgt = mean_level, mean_level
             if init_edge_values is not None and j < len(init_edge_values):
                 D_left_tgt = float(init_edge_values[j][0])
                 D_right_tgt = float(init_edge_values[j][1])
@@ -194,13 +172,11 @@ def _fit_piecewise_constant_curvature(
                 k = float(np.clip(np.log(yL / yR) / dx, 1e-9, k_cap))
                 k_pos, k_neg = k, k
             else:
-                # Near-flat case: symmetric small-slope initialization.
                 k_pos = k0
                 k_neg = k0
 
-            # For 4-parameter periods, solve amplitudes from both edge targets
-            # so left/right anchors are met even on large absolute-u segments.
             if n_p == 4:
+                # Solve amplitudes from both edge targets so anchors are met on large-u segments.
                 Epl = float(np.exp(np.clip(k_pos * x_left, -_Z_CLIP, _Z_CLIP)))
                 Epr = float(np.exp(np.clip(k_pos * x_right, -_Z_CLIP, _Z_CLIP)))
                 Enl = float(np.exp(np.clip(-k_neg * x_left, -_Z_CLIP, _Z_CLIP)))
@@ -239,105 +215,161 @@ def _fit_piecewise_constant_curvature(
     theta0 = _init_theta(-5.0)
     theta0 = np.minimum(np.maximum(theta0, lower + 1e-9), upper - 1e-9)
 
-    # Initialization diagnostics (before nonlinear solve).
-    D_init = np.full(total_years, np.nan)
+    # ── nonlinear solver ──────────────────────────────────────────────────────
+    # Residual scales derived from data: average deaths/yr per period.
+    mean_D = deaths_tgt / np.maximum(period_year_counts, 1.0)
+
+    def _residuals(theta: np.ndarray) -> np.ndarray:
+        res = np.empty(n_constr, dtype=float)
+        k = 0
+
+        # Integral constraints: ∫D_j dt = deaths_tgt[j]
+        for j in range(n):
+            _, u_j = period_grids[j]
+            integral = float(np.sum(_D_j(theta, j, u_j)))
+            res[k] = (integral - deaths_tgt[j]) / deaths_tgt[j]
+            k += 1
+
+        # C0 seam continuity: D_j(right) = D_{j+1}(left)
+        for j in range(n - 1):
+            seam_u  = float(u_bnd[j + 1])
+            D_left  = float(_D_j(theta, j,     seam_u))
+            D_right = float(_D_j(theta, j + 1, seam_u))
+            scale   = max(0.5 * (mean_D[j] + mean_D[j + 1]), 1.0)
+            res[k]  = (D_left - D_right) / scale
+            k += 1
+
+        # C1 seam continuity: D'_j(right) = D'_{j+1}(left)
+        for j in range(n - 1):
+            seam_u   = float(u_bnd[j + 1])
+            dD_left  = float(_dDdu_j(theta, j,     seam_u))
+            dD_right = float(_dDdu_j(theta, j + 1, seam_u))
+            T_avg    = 0.5 * (period_year_counts[j] + period_year_counts[j + 1])
+            scale    = max(0.5 * (mean_D[j] + mean_D[j + 1]) / T_avg, 1.0)
+            res[k]   = (dD_left - dD_right) / scale
+            k += 1
+
+        # Endpoint constraints
+        u0, uN = float(u_bnd[0]), float(u_bnd[n])
+        T0, TN = period_year_counts[0], period_year_counts[n - 1]
+        if D_start is not None:
+            res[k] = (float(_D_j(theta, 0, u0)) - D_start) / max(abs(D_start), 1.0)
+            k += 1
+        if dDdy_start is not None:
+            scale  = max(abs(dDdy_start), mean_D[0] / T0, 1.0)
+            res[k] = (float(_dDdu_j(theta, 0, u0)) - dDdy_start) / scale
+            k += 1
+        if d2Ddy2_start is not None:
+            scale  = max(abs(d2Ddy2_start), mean_D[0] / T0 ** 2, 1.0)
+            res[k] = (float(_d2Ddu2_j(theta, 0, u0)) - d2Ddy2_start) / scale
+            k += 1
+        if D_end is not None:
+            res[k] = (float(_D_j(theta, n - 1, uN)) - D_end) / max(abs(D_end), 1.0)
+            k += 1
+        if dDdy_end is not None:
+            scale  = max(abs(dDdy_end), mean_D[n - 1] / TN, 1.0)
+            res[k] = (float(_dDdu_j(theta, n - 1, uN)) - dDdy_end) / scale
+            k += 1
+        if d2Ddy2_end is not None:
+            scale  = max(abs(d2Ddy2_end), mean_D[n - 1] / TN ** 2, 1.0)
+            res[k] = (float(_d2Ddu2_j(theta, n - 1, uN)) - d2Ddy2_end) / scale
+            k += 1
+
+        return res
+
+    if run_solver:
+        from scipy.optimize import least_squares
+        _nfev = [0]
+        _last_logged = [0]
+
+        def _residuals_logged(theta: np.ndarray) -> np.ndarray:
+            res = _residuals(theta)
+            _nfev[0] += 1
+            if progress_callback is not None and (_nfev[0] - _last_logged[0]) >= _PROGRESS_LOG_EVERY:
+                progress_callback(_nfev[0], float(0.5 * np.dot(res, res)))
+                _last_logged[0] = _nfev[0]
+            return res
+
+        sol = least_squares(
+            _residuals_logged,
+            theta0,
+            bounds=(lower, upper),
+            method="trf",
+            ftol=1e-12,
+            xtol=1e-12,
+            gtol=1e-10,
+            max_nfev=max_nfev,
+            verbose=0,
+        )
+        theta_fitted   = sol.x
+        solver_success = bool(sol.cost < 1e-8)
+        solver_message = sol.message
+        solver_cost    = float(sol.cost)
+    else:
+        theta_fitted   = theta0
+        solver_success = False
+        solver_message = "Solver not run (init only)."
+        solver_cost    = float(np.sum(_residuals(theta0) ** 2)) / 2.0
+
+    # ── build output arrays ───────────────────────────────────────────────────
+    D_init   = np.full(total_years, np.nan)
+    D_fitted = np.full(total_years, np.nan)
     init_edge_report: list[dict[str, float | int]] = []
     init_seam_report: list[dict[str, float | int]] = []
+
     for j in range(n):
         yr_arr = np.arange(anchor_years[j], anchor_years[j + 1] + 1, dtype=int)
-        u_arr = _u_transform(yr_arr, logarithm_reference_year)
-        D_init_arr = _D_j(theta0, j, u_arr)
-        D_init[anchor_years[j]:anchor_years[j + 1] + 1] = D_init_arr
+        u_arr  = _u_transform(yr_arr, logarithm_reference_year)
+        D_init_arr   = _D_period(theta0,       _sl(j), int(period_param_size[j]), _u_rel(j, u_arr))
+        D_fitted_arr = _D_period(theta_fitted, _sl(j), int(period_param_size[j]), _u_rel(j, u_arr))
+        D_init  [anchor_years[j]:anchor_years[j + 1] + 1] = D_init_arr
+        D_fitted[anchor_years[j]:anchor_years[j + 1] + 1] = D_fitted_arr
 
-        u_left = float(u_arr[0])
+        u_left  = float(u_arr[0])
         u_right = float(u_arr[-1])
-        init_left = float(_D_j(theta0, j, u_left))
+        init_left  = float(_D_j(theta0, j, u_left))
         init_right = float(_D_j(theta0, j, u_right))
-        left_tgt = float("nan")
-        right_tgt = float("nan")
+        left_tgt = right_tgt = float("nan")
         if init_edge_values is not None and j < len(init_edge_values):
-            left_tgt = float(init_edge_values[j][0])
+            left_tgt  = float(init_edge_values[j][0])
             right_tgt = float(init_edge_values[j][1])
         init_edge_report.append({
             "period_idx": int(j),
-            "start_t": int(anchor_years[j]),
-            "end_t": int(anchor_years[j + 1]),
-            "n_params": int(period_param_size[j]),
-            "target_left": left_tgt,
+            "start_t":    int(anchor_years[j]),
+            "end_t":      int(anchor_years[j + 1]),
+            "n_params":   int(period_param_size[j]),
+            "target_left":  left_tgt,
             "target_right": right_tgt,
-            "init_left": init_left,
-            "init_right": init_right,
-            "init_min": float(np.nanmin(D_init_arr)),
-            "init_max": float(np.nanmax(D_init_arr)),
-            "err_left": float(init_left - left_tgt) if np.isfinite(left_tgt) else float("nan"),
+            "init_left":    init_left,
+            "init_right":   init_right,
+            "init_min":  float(np.nanmin(D_init_arr)),
+            "init_max":  float(np.nanmax(D_init_arr)),
+            "err_left":  float(init_left  - left_tgt)  if np.isfinite(left_tgt)  else float("nan"),
             "err_right": float(init_right - right_tgt) if np.isfinite(right_tgt) else float("nan"),
         })
+
     for j in range(1, n):
-        seam_u = float(u_bnd[j])
-        left_val = float(_D_j(theta0, j - 1, seam_u))
-        right_val = float(_D_j(theta0, j, seam_u))
+        seam_u    = float(u_bnd[j])
+        left_val  = float(_D_j(theta0, j - 1, seam_u))
+        right_val = float(_D_j(theta0, j,     seam_u))
         init_seam_report.append({
-            "seam_idx": int(j),
-            "seam_t": int(anchor_years[j]),
+            "seam_idx":        int(j),
+            "seam_t":          int(anchor_years[j]),
             "left_period_idx": int(j - 1),
-            "right_period_idx": int(j),
-            "left_val": left_val,
+            "right_period_idx":int(j),
+            "left_val":  left_val,
             "right_val": right_val,
-            "jump": float(right_val - left_val),
+            "jump":      float(right_val - left_val),
         })
 
     return dict(
         D_init=D_init,
-        D_fitted=D_init.copy(),
+        D_fitted=D_fitted,
         n_params=n_params,
         n_constraints=n_constr,
-        max_abs_residual=0.0,
-        max_abs_scaled_residual=0.0,
-        max_abs_equation_residual=0.0,
-        max_abs_equation_scaled_residual=0.0,
-        max_abs_positivity_violation=0.0,
-        max_abs_edge_anchor_error=0.0,
-        max_abs_c0_raw=0.0,
-        max_abs_c0_clipped=0.0,
-        max_abs_c1_raw=0.0,
+        solver_success=solver_success,
+        solver_message=solver_message,
+        solver_cost=solver_cost,
         init_edge_report=init_edge_report,
         init_seam_report=init_seam_report,
-        solver_success=False,
-        solver_message="Init only (fitting not implemented).",
-    )
-
-
-def fit_piecewise_polynomial(
-    cumulated_D: dict[tuple[int, int], float],
-    quartic_period_ids: list[int],
-    total_years: int,
-    D_start: float | None = None,
-    D_end: float | None = None,
-    dDdy_start: float | None = None,
-    d2Ddy2_start: float | None = None,
-    dDdy_end: float | None = None,
-    d2Ddy2_end: float | None = None,
-    logarithm_reference_year: float | None = None,
-    init_edge_values: list[tuple[float, float]] | None = None,
-    init_x0_t: float = 0.0,
-) -> dict:
-    """Init-only entrypoint for piecewise constant-curvature basis.
-
-    `quartic_period_ids` means periods with 4-parameter sinh+cosh basis.
-    Other periods use 3-parameter sinh basis.
-    Fitting (nonlinear solve) is not implemented.
-    """
-    return _fit_piecewise_constant_curvature(
-        cumulated_D=cumulated_D,
-        four_param_period_ids=quartic_period_ids,
-        total_years=total_years,
-        D_start=D_start,
-        D_end=D_end,
-        dDdy_start=dDdy_start,
-        d2Ddy2_start=d2Ddy2_start,
-        dDdy_end=dDdy_end,
-        d2Ddy2_end=d2Ddy2_end,
-        logarithm_reference_year=logarithm_reference_year,
-        init_edge_values=init_edge_values,
-        init_x0_t=init_x0_t,
     )
