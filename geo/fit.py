@@ -334,10 +334,11 @@ def fit_piecewise_constant_curvature(
             left_tgt  = float(init_edge_values[j][0])
             right_tgt = float(init_edge_values[j][1])
         init_edge_report.append({
-            "period_idx": int(j),
-            "start_t":    int(anchor_years[j]),
-            "end_t":      int(anchor_years[j + 1]),
-            "n_params":   int(period_param_size[j]),
+            "period_idx":   int(j),
+            "start_t":      int(anchor_years[j]),
+            "end_t":        int(anchor_years[j + 1]),
+            "n_params":     int(period_param_size[j]),
+            "target_total": float(deaths_tgt[j]),
             "target_left":  left_tgt,
             "target_right": right_tgt,
             "init_left":    init_left,
@@ -362,6 +363,52 @@ def fit_piecewise_constant_curvature(
             "jump":      float(right_val - left_val),
         })
 
+    # ── constraint report (evaluated at theta_fitted) ─────────────────────────
+    constraint_report: list[dict] = []
+    for j in range(n):
+        _, u_j = period_grids[j]
+        tgt = float(deaths_tgt[j])
+        val = float(np.sum(_D_j(theta_fitted, j, u_j)))
+        constraint_report.append({
+            "kind": "integral", "period_idx": int(j),
+            "start_t": int(anchor_years[j]), "end_t": int(anchor_years[j + 1]),
+            "target": tgt, "value": val, "error": val - tgt,
+        })
+    for j in range(n - 1):
+        seam_u  = float(u_bnd[j + 1])
+        D_left  = float(_D_j(theta_fitted, j,     seam_u))
+        D_right = float(_D_j(theta_fitted, j + 1, seam_u))
+        jump    = D_right - D_left
+        constraint_report.append({
+            "kind": "C0_seam", "seam_t": int(anchor_years[j + 1]),
+            "target": 0.0, "value": jump, "error": jump,
+        })
+    for j in range(n - 1):
+        seam_u   = float(u_bnd[j + 1])
+        dD_left  = float(_dDdu_j(theta_fitted, j,     seam_u))
+        dD_right = float(_dDdu_j(theta_fitted, j + 1, seam_u))
+        jump     = dD_right - dD_left
+        constraint_report.append({
+            "kind": "C1_seam", "seam_t": int(anchor_years[j + 1]),
+            "target": 0.0, "value": jump, "error": jump,
+        })
+    u0, uN = float(u_bnd[0]), float(u_bnd[n])
+    for name, val_fn, tgt_val in [
+        ("D(start)",        lambda: float(_D_j(theta_fitted, 0,     u0)), D_start),
+        ("dD/dy(start)",    lambda: float(_dDdu_j(theta_fitted, 0,     u0)), dDdy_start),
+        ("d²D/dy²(start)",  lambda: float(_d2Ddu2_j(theta_fitted, 0,     u0)), d2Ddy2_start),
+        ("D(end)",          lambda: float(_D_j(theta_fitted, n - 1, uN)), D_end),
+        ("dD/dy(end)",      lambda: float(_dDdu_j(theta_fitted, n - 1, uN)), dDdy_end),
+        ("d²D/dy²(end)",    lambda: float(_d2Ddu2_j(theta_fitted, n - 1, uN)), d2Ddy2_end),
+    ]:
+        if tgt_val is None:
+            continue
+        v = val_fn()
+        constraint_report.append({
+            "kind": "endpoint", "name": name,
+            "target": float(tgt_val), "value": v, "error": v - float(tgt_val),
+        })
+
     return dict(
         D_init=D_init,
         D_fitted=D_fitted,
@@ -372,4 +419,5 @@ def fit_piecewise_constant_curvature(
         solver_cost=solver_cost,
         init_edge_report=init_edge_report,
         init_seam_report=init_seam_report,
+        constraint_report=constraint_report,
     )

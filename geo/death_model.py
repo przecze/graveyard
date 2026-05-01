@@ -142,11 +142,16 @@ def render() -> None:
         min_value=0, max_value=50, value=10, step=1,
         help="Moving-average window for OWID deaths series. 0 = raw.",
     )
-    run_solver = ui.sidebar_button(
-        "Run nonlinear fit",
-        help="Run nonlinear least-squares fit. Without clicking, only initialization is shown.",
+    ring_width = ui.sidebar_slider(
+        "Ring width (years)",
+        min_value=1, max_value=100, value=10, step=1,
+        help="Width of each time-ring bin in years.",
     )
-
+    max_graves_per_segment = ui.sidebar_slider(
+        "Max graves per segment",
+        min_value=100_000, max_value=10_000_000, value=1_000_000, step=100_000,
+        help="Maximum graves per segment; determines number of segments per ring.",
+    )
     fit_ancient_start = ancient_start + ancient_flat_length
 
     # ── ancient period quantities ──────────────────────────────────────────────
@@ -239,28 +244,72 @@ def render() -> None:
 
     total_years = anchor_cal_years[-1] - ancient_start + 1
 
+    _fit_kwargs = dict(
+        cumulated_D=cumulated_D,
+        four_param_period_ids=four_param_period_ids,
+        total_years=total_years,
+        D_start=D_late_ancient_start,
+        D_end=D_1950,
+        dDdy_start=dDdy_late_ancient_start,
+        d2Ddy2_start=d2Ddy2_late_ancient_start,
+        dDdy_end=dDdy_1950,
+        d2Ddy2_end=d2Ddy2_1950,
+        init_edge_values=init_edge_values,
+    )
+
+    # ── init fit (always) ─────────────────────────────────────────────────────
+    r_init = fit.fit_piecewise_constant_curvature(**_fit_kwargs, run_solver=False)
+
+    def _constr_rows(report: list[dict]) -> list[dict]:
+        rows = []
+        for row in report:
+            kind = row["kind"]
+            if kind == "integral":
+                cal_s = int(row["start_t"]) + ancient_start
+                cal_e = int(row["end_t"]) + ancient_start
+                label = f"∫D  {_yfmt(cal_s)} → {_yfmt(cal_e)}"
+            elif kind == "C0_seam":
+                label = f"C0 seam  {_yfmt(int(row['seam_t']) + ancient_start)}"
+            elif kind == "C1_seam":
+                label = f"C1 seam  {_yfmt(int(row['seam_t']) + ancient_start)}"
+            else:
+                label = row["name"]
+            rows.append({
+                "constraint": label,
+                "target":     row["target"],
+                "value":      row["value"],
+                "error":      row["error"],
+            })
+        return rows
+
+    with ui.expander("Initialized constraint residuals", expanded=False):
+        ui.dataframe(_constr_rows(r_init.get("constraint_report", [])), width="stretch")
+
+    # ── run solver button ─────────────────────────────────────────────────────
+    run_solver = ui.button(
+        "Run nonlinear fit",
+        help="Run nonlinear least-squares fit.",
+    )
+
     # ── fit ───────────────────────────────────────────────────────────────────
-    _status_msg = "Running nonlinear fit…" if run_solver else "Initializing deaths/yr basis…"
-    with ui.solver_status(_status_msg) as _log:
-        r = fit.fit_piecewise_constant_curvature(
-            cumulated_D=cumulated_D,
-            four_param_period_ids=four_param_period_ids,
-            total_years=total_years,
-            D_start=D_late_ancient_start,
-            D_end=D_1950,
-            dDdy_start=dDdy_late_ancient_start,
-            d2Ddy2_start=d2Ddy2_late_ancient_start,
-            dDdy_end=dDdy_1950,
-            d2Ddy2_end=d2Ddy2_1950,
-            init_edge_values=init_edge_values,
-            run_solver=run_solver,
-            progress_callback=(lambda nfev, cost: _log(f"nfev={nfev:5d}  cost={cost:.6e}")) if run_solver else None,
-        )
+    if run_solver:
+        with ui.solver_status("Running nonlinear fit…") as _log:
+            r = fit.fit_piecewise_constant_curvature(
+                **_fit_kwargs,
+                run_solver=True,
+                progress_callback=lambda nfev, cost: _log(f"nfev={nfev:5d}  cost={cost:.6e}"),
+            )
+    else:
+        r = r_init
 
     ui.write(
         f"**Solver:** {'✓ converged' if r['solver_success'] else '✗ not converged'}"
         f" — cost={r['solver_cost']:.3e} — {r['solver_message']}"
     )
+
+    # ── solver constraints table ──────────────────────────────────────────────
+    if run_solver:
+        ui.dataframe(_constr_rows(r.get("constraint_report", [])), width="stretch")
 
     D_init       = r["D_init"]
     D_fitted     = r["D_fitted"]
@@ -275,25 +324,6 @@ def render() -> None:
         log_x = ui.toggle("Log X axis", value=False)
     with col_legend:
         show_legend = ui.toggle("Show legend", value=True)
-
-    with ui.expander("Edge targets vs initialized edge values", expanded=False):
-        edge_rows = []
-        for row in r.get("init_edge_report", []):
-            cal_s = int(row["start_t"]) + ancient_start
-            cal_e = int(row["end_t"]) + ancient_start
-            edge_rows.append({
-                "period":       f"{_yfmt(cal_s)} → {_yfmt(cal_e)}",
-                "n_params":     row["n_params"],
-                "target_left":  row["target_left"],
-                "target_right": row["target_right"],
-                "init_left":    row["init_left"],
-                "init_right":   row["init_right"],
-                "err_left":     row["err_left"],
-                "err_right":    row["err_right"],
-                "init_min":     row["init_min"],
-                "init_max":     row["init_max"],
-            })
-        ui.dataframe(edge_rows, width="stretch")
 
     # ── build combined model + OWID arrays ────────────────────────────────────
     # Flat analytic segment covers [ancient_start, fit_ancient_start) exactly.
