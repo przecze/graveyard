@@ -6,7 +6,7 @@ const HALF_VIEW = 25; // metric viewport radius
 export default function PolarWalker() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hudRef    = useRef<HTMLDivElement>(null);
-  const [R, setR] = useState(100);
+  const [R, setR] = useState(10_000);
   const Rref = useRef(R);
 
   useEffect(() => { Rref.current = R; }, [R]);
@@ -25,7 +25,7 @@ export default function PolarWalker() {
     resize();
     window.addEventListener('resize', resize);
 
-    let rho = 100;
+    let rho = 1000;
     let phi = 0;
 
     const keys: Record<string, boolean> = {};
