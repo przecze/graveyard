@@ -1,5 +1,11 @@
 import { createRoot } from 'react-dom/client';
 import VisitorView from './VisitorView';
+import PolarWalker from './PolarWalker';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(<VisitorView />);
+const root = document.getElementById('root')!;
+const app = window.location.pathname.startsWith('/v2')
+  ? <PolarWalker />
+  : <VisitorView />;
+
+createRoot(root).render(app);

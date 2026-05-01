@@ -40,6 +40,10 @@ def sidebar_button(label, *, help=""):
     if IS_MAIN: return True
     return st.sidebar.button(label, help=help)
 
+def button(label, *, help=""):
+    if IS_MAIN: return True
+    return st.button(label, help=help)
+
 def spinner(msg):
     if IS_MAIN: return contextlib.nullcontext()
     return st.spinner(msg)
