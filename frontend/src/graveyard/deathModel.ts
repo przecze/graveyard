@@ -29,7 +29,7 @@ export type Period = { a: number; b: number; target: number; fitted: number; sou
 
 // knot spacing per data period (years): coarse data → coarse knots
 const KNOT_STEP: [number, number][] = [
-  [T0, 2000], [1, 200], [1200, 100], [1650, 50], [1750, 25], [1850, 20], [1900, 10], [1950, 5], [T_END, 2.5],
+  [T0, 2000], [1, 100], [1200, 100], [1650, 50], [1750, 25], [1850, 20], [1900, 10], [1950, 5], [T_END, 2.5],
 ];
 
 // ── data periods ───────────────────────────────────────────────────────────
@@ -132,7 +132,13 @@ export class DeathModel {
   private readonly cumTab: Float64Array; // ∫_{T_START}^{T_START+k} D
   private readonly Dtab: Float64Array;
 
-  constructor() {
+  /**
+   * `flatten`: optional reshaping of the prior inside PRB's coarse periods,
+   * e.g. at the start of the history zone: from `from` the rate starts at
+   * `target` (the old mean rate over the window) and rises more slowly for
+   * `years`. Period totals stay exact (the multiplier compensates).
+   */
+  constructor(flatten?: { from: number; years: number; target: number; end: number }) {
     const { periods: raw, ancientDeaths } = rawPeriods();
 
     const breaks = [ANCIENT_START];
@@ -153,7 +159,12 @@ export class DeathModel {
     //     OWID decade means. Log space → P > 0 by construction.
     //  2. D = P · m, with m ≈ 1 the smoothest multiplier that makes every
     //     period total exact.
-    const points = priorPoints();
+    let points = priorPoints();
+    if (flatten && flatten.years > 0) {
+      const a = flatten.from, b = flatten.from + flatten.years;
+      points = [...points.filter(([t]) => t < a || t > b), [a, flatten.target], [b, flatten.end]]
+        .sort((p, q) => p[0] - q[0]) as [number, number][];
+    }
     const lnL = (t: number) => { // piecewise-linear ln D through the points
       if (t <= points[0][0]) return Math.log(points[0][1]);
       for (let i = 1; i < points.length; i++) if (t <= points[i][0]) {
@@ -214,7 +225,18 @@ export class DeathModel {
   }
 }
 
-let cached: DeathModel | null = null;
-export function deathModel(): DeathModel {
-  return cached ??= new DeathModel();
+const cache = new Map<string, DeathModel>();
+/** base model, or one flattened for `years` after `from` (see constructor) */
+export function deathModel(flatten?: { from: number; years: number }): DeathModel {
+  const key = flatten && flatten.years > 0 ? `${flatten.from}:${flatten.years}` : '';
+  let m = cache.get(key);
+  if (!m) {
+    if (!key) m = new DeathModel();
+    else {
+      const base = deathModel(), { from, years } = flatten!;
+      m = new DeathModel({ from, years, target: (base.cum(from + years) - base.cum(from)) / years, end: base.D(from + years) });
+    }
+    cache.set(key, m);
+  }
+  return m;
 }

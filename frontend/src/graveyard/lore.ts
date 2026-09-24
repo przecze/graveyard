@@ -58,8 +58,6 @@ export function graveInfo(id: number, year: number): GraveInfo {
 export type Landmark = { year: number; title: string; text: string };
 
 export const LANDMARKS: Landmark[] = [
-  { year: -40000, title: 'Deep time', text: 'Past the flat core the ground curves so the ~9 billion ancient graves fit in a smaller radius. Time runs at a varying pace here, blending smoothly into the steady pace of recorded history.' },
-  { year: -8000, title: 'Rim of the Ancient Circle', text: 'About 9 billion people died before 8000 BCE. From here outward time is linear: every few metres walked is one year, and the curvature of the ground follows how fast deaths per year change.' },
   { year: -3000, title: 'Writing', text: 'Around here the first written records appear. Everyone behind you lived and died before anyone could write their name.' },
   { year: 1, title: 'Year 1', text: 'World population ≈ 300 million. About 55 billion people have died before this ring — roughly half of everyone who ever lived.' },
   { year: 1200, title: 'Medieval world', text: 'PRB data resolution here is centuries: the Black Death (1347–1351) is inside the smoothed 1200–1650 period, so the rings do not show its spike.' },

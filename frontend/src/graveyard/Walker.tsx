@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { DEFAULT_SHAPE, Surface, T0, T_END, type Shape } from './surface';
+import { DEFAULT_SHAPE, Surface, T_END, type Shape } from './surface';
 import { buildMarker, buildSprites, SPRITE_H, SPRITE_W, STYLES_BY_ERA, type Style } from './sprites';
 import { formatYear, graveInfo, hash01, LANDMARKS, styleFor, type GraveInfo } from './lore';
 import './walker.css';
@@ -35,7 +35,6 @@ function nowYear(): number {
 }
 
 function markStep(t: number): number {
-  if (t < T0) return 5000;
   if (t < 0) return 500;
   if (t < 1500) return 100;
   if (t < 1800) return 50;
@@ -55,15 +54,28 @@ let S = new Surface(DEFAULT_SHAPE);
 const welcome = () => ({
   year: -50000, title: 'The dawn of humanity',
   text: `Every person who ever died has a grave here, about ${Math.round(S.rowStart[S.nRows] / 1e9)} billion of them. `
-    + `Walk outward and time moves forward: the oldest graves are here at the centre, the newest at the edge, ${Math.round(S.rhoEndTable / 1000)} km away.`,
+    + `First you cross the ancient era: everyone who died before ${formatYear(S.t0)}, undated. Then history begins and time moves forward with every step, to the newest graves at the edge, ${Math.round(S.rhoEndTable / 1000)} km away.`,
 });
 
 type Hit = { info: GraveInfo; row: number; rho: number; phi: number };
 
-const JUMPS: [string, number][] = [
-  ['Centre', -50000], ['20,000 BCE', -20000], ['Rim 8000 BCE', -8000], ['1 CE', 1],
+// NaN = the edge; strings are special places
+const JUMPS: [string, number | 'centre' | 'ancient' | 'history'][] = [
+  ['Centre', 'centre'], ['Ancient era', 'ancient'], ['History begins', 'history'], ['1 CE', 1],
   ['1500', 1500], ['1900', 1900], ['2000', 2000], ['Edge (now)', NaN],
 ];
+
+const ancientSign = () => ({
+  year: -50000, title: 'The ancient era',
+  text: `${fmtBig(S.ancientGraves)} people died before ${formatYear(S.t0)}. They rest here together, undated, in no particular order of years. `
+    + `The ground widens quickly out of the flat core so all of them fit; ${fmtLen(S.rho0 - S.coreR)} further out, history begins.`,
+});
+const historySign = () => ({
+  year: S.t0, title: 'History begins',
+  text: `From this ring outward every grave is dated and time is linear: ${S.v} m walked is one year. `
+    + `Behind you lie the ${fmtBig(S.ancientGraves)} of the ancient era.`,
+});
+const landmarks = () => [historySign(), ...LANDMARKS.filter(l => l.year > S.t0 + 100)];
 
 export default function Walker() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -107,9 +119,10 @@ export default function Walker() {
     return () => clearTimeout(id);
   }, [shape]);
 
-  const jump = (t: number) => {
+  const jump = (t: number | 'centre' | 'ancient' | 'history') => {
     const st = state.current;
-    st.rho = isNaN(t) ? S.rhoAtTime(nowYear()) - 12 : t <= -50000 ? 4 : S.rhoAtTime(t) + 1.3;
+    st.rho = t === 'centre' ? 4 : t === 'ancient' ? (S.coreR + S.rho0) / 2 : t === 'history' ? S.rho0 + 1.3
+      : isNaN(t) ? S.rhoAtTime(nowYear()) - 12 : S.rhoAtTime(t) + 1.3;
   };
 
   useEffect(() => {
@@ -462,15 +475,16 @@ export default function Walker() {
       }
 
       // ── year markers at aisle crossings ────────────────────────────────────
-      const tA = S.time(Math.max(rhoMin, S.layout.plazaR)), tB = S.time(Math.min(rhoMax, rhoEdge));
+      // no dates in the ancient zone: markers start at the switch
+      const tA = Math.max(S.t0, S.time(Math.max(rhoMin, S.rho0))), tB = S.time(Math.max(S.rho0, Math.min(rhoMax, rhoEdge)));
       const marks: { t: number; landmark: boolean }[] = [];
       for (let t = Math.ceil(tA / markStep(tA)) * markStep(tA); t <= tB && marks.length < 80; ) {
         marks.push({ t, landmark: false });
         const s = markStep(t + 0.5);
-        const next = Math.floor(t / s) * s + s;
-        t = t < T0 && next > T0 ? T0 : next;
+        t = Math.floor(t / s) * s + s;
       }
-      for (const lm of LANDMARKS) if (lm.year >= tA && lm.year <= tB) marks.push({ t: lm.year, landmark: true });
+      if (rhoMax < S.rho0) marks.length = 0;
+      for (const lm of landmarks()) if (lm.year >= tA && lm.year <= tB) marks.push({ t: lm.year, landmark: true });
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       for (const { t, landmark } of marks) {
@@ -550,7 +564,7 @@ export default function Walker() {
       mctx.beginPath(); mctx.arc(c, c, R + 12, 0, TAU); mctx.fill();
       // era bands
       const eras: [number, number, string][] = [
-        [-50000, -8000, '#2f3a27'], [-8000, -3000, '#3b4630'], [-3000, 400, '#4a4a36'],
+        [-50000, S.t0, '#2f3a27'], [S.t0, 400, '#4a4a36'],
         [400, 1700, '#4b4639'], [1700, 1920, '#5b5a55'], [1920, nowYear(), '#404046'],
       ];
       for (let i = eras.length - 1; i >= 0; i--) {
@@ -566,13 +580,13 @@ export default function Walker() {
       mctx.font = `${opts.current.bigMap ? 12 : 9}px monospace`;
       mctx.fillStyle = 'rgba(230,220,190,0.75)';
       mctx.textAlign = 'left';
-      const labelled = opts.current.bigMap ? [-40000, -20000, -8000, 1, 1000, 1500, 1800, 1900, 1950, 2000] : [-8000, 1];
+      const labelled = opts.current.bigMap ? [S.t0, 1, 1000, 1500, 1800, 1900, 1950, 2000] : [S.t0, 1];
       for (const t of labelled) {
         const r = mapRadiusOf(S.rhoAtTime(t), rhoEdge, cumNow) * R;
         if (R - r < 4 && t !== labelled[labelled.length - 1]) continue;
         mctx.strokeStyle = 'rgba(230,220,190,0.18)';
         mctx.beginPath(); mctx.arc(c, c, r, 0, TAU); mctx.stroke();
-        mctx.fillText(t === 1 ? '1 CE' : t < 0 ? `${-t / 1000}k BCE` : `${t}`, c + r * 0.72 + 2, c - r * 0.7);
+        mctx.fillText(t === S.t0 ? 'history' : t === 1 ? '1 CE' : `${t}`, c + r * 0.72 + 2, c - r * 0.7);
       }
       const [x, y] = at(state.current.rho, state.current.phi);
       mctx.fillStyle = '#ffeab0';
@@ -616,17 +630,21 @@ export default function Walker() {
       const toEdge = Math.max(0, rhoEdge - rho);
       const speed = st.speed || (opts.current.walkMode ? WALK_SPEED : (W / st.zoom) * SCREENS_PER_SECOND);
       const lines = [
-        `<b>${rho < S.layout.plazaR ? 'Central plaza' : formatYear(t, inAncient)}</b>${inAncient ? ` <span class="dim">· ${rho <= S.coreR ? 'flat core' : 'ancient zone'}</span>` : ''}`,
+        `<b>${rho < S.layout.plazaR ? 'Central plaza' : inAncient ? `Ancient era` : formatYear(t)}</b>`
+          + (inAncient ? ` <span class="dim">· before ${formatYear(S.t0)}, undated${rho <= S.coreR ? ' · flat core' : ''}</span>` : ''),
         `graves nearer the centre <b>${fmtBig(S.cum(rho))}</b> <span class="dim">of ${fmtBig(cumNow)}</span>`,
-        `deaths that year <b>${fmtBig(deaths)}</b>`,
+        inAncient ? `ancient era <b>${(100 * S.cum(rho) / S.ancientGraves).toFixed(0)}%</b> behind you · history in <b>${fmtLen(S.rho0 - rho)}</b>`
+          : `deaths that year <b>${fmtBig(deaths)}</b>`,
         `from centre <b>${fmtLen(rho)}</b> · to the edge <b>${fmtLen(toEdge)}</b>`,
         `ring around here <b>${fmtLen(TAU * fp)}</b> <span class="dim">(flat plane: ${fmtLen(TAU * rho)})</span>`,
         `curvature <b>${kText}</b>`,
-        `1 year = <b>${fmtLen(S.vAt(t))}</b> outward${inAncient ? ' <span class="dim">(varies in the ancient zone)</span>' : ''}`,
+        inAncient ? `<span class="dim">no dates here</span>` : `1 year = <b>${fmtLen(S.v)}</b> outward`,
         `speed ${fmtLen(speed)}/s · edge in ${fmtDur(toEdge / speed)} · view ${fmtLen(W / st.zoom)} · ${drawn} graves drawn`,
       ];
       hudRef.current!.innerHTML = lines.join('<br>');
-      const near = rho < S.layout.plazaR + 40 ? welcome() : LANDMARKS.find(l => Math.abs(S.rhoAtTime(l.year) - rho) < 40);
+      const near = rho < S.layout.plazaR + 40 ? welcome()
+        : rho > S.coreR && rho < S.coreR + 60 ? ancientSign()
+        : landmarks().find(l => Math.abs(S.rhoAtTime(l.year) - rho) < 40);
       signRef.current!.innerHTML = near ? `<b>${near.title}</b>${near.year === -50000 ? '' : ` · ${formatYear(near.year)}`}<br>${near.text}` : '';
       signRef.current!.style.display = near ? 'block' : 'none';
     }
@@ -689,7 +707,7 @@ export default function Walker() {
         <div className="gy-card gy-panel">
           <button className="gy-close" onClick={() => setSelected(null)}>×</button>
           <div className="gy-card-title">Grave #{selected.info.id.toLocaleString('en-US')}</div>
-          <div>died <b>{formatYear(selected.info.year, selected.info.year < T0)}</b></div>
+          <div>died <b>{selected.info.year < S.t0 ? `before ${formatYear(S.t0)} (ancient era)` : formatYear(selected.info.year)}</b></div>
           <div>{selected.info.sex}, aged {selected.info.ageText}</div>
           <div className="dim">row {selected.row.toLocaleString('en-US')} · {fmtLen(selected.rho)} from the centre</div>
           <div className="dim small">Details are procedurally generated from the grave id — plausible, not real.</div>
@@ -715,23 +733,24 @@ function Slider({ label, value, min, max, step, onChange, fmt }: {
 function Geometry({ shape, setShape, surface }: { shape: Shape; setShape: (s: Shape) => void; surface: Surface }) {
   const r = surface.report;
   const hist = surface.rhoAtTime(T_END) - surface.rho0;
-  const minNoNeck = surface.model.ancientDeaths / surface.model.D(T0) * shape.v;
   return (
     <details className="gy-geometry">
       <summary>geometry</summary>
-      <Slider label="flat core" value={shape.coreR / 1000} min={1} max={40} step={0.5}
-        onChange={v => setShape({ ...shape, coreR: v * 1000 })} fmt={v => `${v} km`} />
-      <Slider label="ancient zone" value={shape.ancientR / 1000} min={20} max={250} step={1}
-        onChange={v => setShape({ ...shape, ancientR: v * 1000 })} fmt={v => `${v} km`} />
+      <Slider label="history begins" value={shape.switchYear} min={-8000} max={-1000} step={100}
+        onChange={v => setShape({ ...shape, switchYear: v })} fmt={v => formatYear(v)} />
+      <Slider label="flatten after" value={shape.flatten} min={0} max={2000} step={100}
+        onChange={v => setShape({ ...shape, flatten: v })} fmt={v => v ? `${v} yr` : 'off'} />
+      <Slider label="flat core" value={shape.coreR / 1000} min={0.1} max={10} step={0.1}
+        onChange={v => setShape({ ...shape, coreR: v * 1000 })} fmt={v => `${v.toFixed(1)} km`} />
+      <Slider label="flare" value={shape.flare / 1000} min={0.3} max={10} step={0.1}
+        onChange={v => setShape({ ...shape, flare: v * 1000 })} fmt={v => `${v.toFixed(1)} km`} />
       <Slider label="1 history year" value={shape.v} min={0.5} max={10} step={0.1}
         onChange={v => setShape({ ...shape, v })} fmt={v => `${v.toFixed(1)} m`} />
       {r.ok ? (
         <div className="dim">
-          ancient {fmtLen(surface.rho0)} + history {fmtLen(hist)} · ring at 8000 BCE {fmtLen(r.rimRing)} · β = {r.beta.toFixed(2)}<br />
-          tightest ancient curvature radius {fmtLen(r.minKRadius)} ·{' '}
-          {r.shrinks && r.neckRatio < 0.99
-            ? <span className="gy-warn">rings narrow to {(r.neckRatio * 100).toFixed(0)}% outward (a neck). Theoretical floor without one: {fmtLen(minNoNeck)} (a flat cylinder)</span>
-            : <span>rings never shrink</span>}
+          ancient <b>{fmtLen(surface.rho0)}</b> + history <b>{fmtLen(hist)}</b>: ancient is <b>{(100 * r.ancientShare).toFixed(0)}%</b> of the walk
+          {' '}(floor {(100 * r.floorShare).toFixed(0)}%)<br />
+          ancient ring {fmtLen(r.plateauRing)} · tightest curvature radius (flare) {fmtLen(r.minKRadius)} · rings never shrink
         </div>
       ) : <div className="gy-warn">{r.problem}</div>}
     </details>
@@ -750,12 +769,10 @@ function About({ onClose }: { onClose: () => void }) {
           The surface is rotationally symmetric, ds² = dρ² + f(ρ)² dφ², so a ring at distance ρ is 2π·f(ρ) long.
         </p>
         <ul>
-          <li><b>Time is the master coordinate.</b> Choose a speed of time v(t) (metres per year); then ρ = ∫v dt and <b>f = D(t) / (2πσ v)</b>, so each ring holds exactly the graves of its years: uniform density by construction.</li>
-          <li><b>Flat core</b> (radius {fmtLen(S.coreR)}): v follows the flat-disc law, f = ρ exactly.</li>
-          <li><b>Ancient zone</b> (to {fmtLen(S.rho0)}, {fmtBig(m.ancientDeaths)} graves before 8000 BCE): ln f blends (C∞) from the disc to f₀·(D/D₀)^β with β → 1 at 8000 BCE; β = {S.report.beta.toFixed(2)} is solved so the zone has the radius you set. For 0 ≤ β ≤ 1 rings never shrink.</li>
-          <li><b>History</b>: v = {S.v} m/year constant, time linear in distance, K = −D″/(D v²).</li>
-          <li>D is C⁴ and every blend is C∞, so f is C⁴ and the curvature is C²: no creases or jumps anywhere.</li>
-          <li>Hard limit: without a neck the ancient zone needs ≳ N_ancient / D(8000 BCE) ≈ {Math.round(m.ancientDeaths / m.D(T0) / 1000)}k years × v of radius, i.e. ≈ {(m.ancientDeaths / m.D(T0) / (T_END - T0)).toFixed(1)}× the history zone, whatever v is.</li>
+          <li><b>History</b> (from {formatYear(S.t0)}): time is linear, {S.v} m per year, and uniform density forces <b>f = D(t) / (2πσv)</b>. Curvature K = −D″/(D v²).</li>
+          <li><b>Ancient era</b> ({fmtBig(S.ancientGraves)} graves before {formatYear(S.t0)}, undated): flat core (f = ρ, {fmtLen(S.coreR)}), then the rings widen smoothly over the flare to a plateau and blend into the history law at the rim. Graves are placed by area. {fmtLen(S.rho0)} in total.</li>
+          <li>Every blend is C∞ and D is C⁴, so f is C⁴ and the curvature is C²: no creases or jumps anywhere. Rings never shrink outward.</li>
+          <li>Hard limit: with rings that never shrink the ancient zone needs ≳ N_before · v / D(switch) (a cylinder), here {fmtLen(S.ancientGraves * S.v / m.D(S.t0))}: {(100 * S.report.floorShare).toFixed(0)}% of the walk. Best switch ≈ 3000 BCE. "Flatten after" starts the rate after the switch higher and lets it rise slower (same totals), which lowers the floor.</li>
           <li>The view is a conformal map: isothermal coordinate u = ∫dρ/f, screen = f(ρ_you)·(e^(Δu + iΔφ) − 1). It is exact at your feet; zoom out to see the rest of the world shrink or grow.</li>
         </ul>
         <h2>The death model</h2>

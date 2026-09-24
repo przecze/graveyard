@@ -37,15 +37,15 @@ A 2D walkable graveyard with geometry fixed by the historical data. Everything i
   * P: smooth log-space fit of PRB's own exponential-per-period estimates and OWID decade means (positive by construction);
   * m ≈ 1: smoothest multiplier (min ∫m′² + α·m‴²) that makes every period total exact: all PRB periods including the single pre-8000 BCE total, and each OWID decade.
   * Both steps are single linear (KKT) solves: no iterative fitting, nothing to converge.
-* **Surface** (`surface.ts`): metric ds² = dρ² + f(ρ)²dφ², uniform grave density σ (one plot = 2.6 m × 1.3 m). **Time is the master coordinate**: pick a smooth speed of time v(t) (m/yr), then ρ = ∫v dt and f = D/(2πσv), so every ring holds exactly its years' graves.
-  * flat core: v follows the flat-disc law, f = ρ exactly;
-  * ancient zone: ln f blends (C∞ step) from the disc to f₀·(D/D₀)^β, with β → 1 at 8000 BCE; β is bisected to hit the chosen ancient radius. For 0 ≤ β ≤ 1 rings never shrink;
-  * history: v constant (time linear in distance), K = −D″/(D·v²).
-  * f is C⁴, so the curvature is C² everywhere.
-  * **Hard limit**: without a neck (rings shrinking outward) the ancient zone needs ≳ N_ancient / D(8000 BCE) ≈ 18 500 "history years" of radius, i.e. ≳ 1.8× the whole history zone, whatever v is. The blends used here reach ~32k years (95 km at 3 m/yr, the default). Smaller values are allowed and show the neck.
+* **Surface** (`surface.ts`): metric ds² = dρ² + f(ρ)²dφ², uniform grave density σ (one plot = 2.6 m × 1.3 m).
+  * **History** (from the switch year, default 3000 BCE): time is linear (v m per year), and uniform density forces f = D(t)/(2πσv), so curvature is K = −D″/(D·v²). Year markers start here.
+  * **Ancient era**: one undated bucket for everyone who died before the switch. Since nobody sees time there, it is defined in distance: flat core (f = ρ), a C∞ flare, a plateau (cylinder) whose length is solved from the grave count, and a C∞ rim blend onto the history law. Every blend only widens rings, so there is no neck.
+  * f is C⁴, so curvature is C² everywhere: no creases at the core, flare or rim.
+  * **Hard limit**: if rings never shrink, the ancient zone is at least N_before·v/D(switch) wide (a cylinder). As a share of the walk that is 65% for an 8000 BCE switch, bottoming out at ~41% around 3000 BCE (later switches pile too many graves into the bucket).
+  * **Flatten after** (optional): the death rate right after the switch starts higher and rises more slowly, with the same PRB totals. This widens the rim and lowers the floor (~37% with 1000 years). Default: 3000 BCE, 1000 years, 1.5 km core, 2.5 km flare, which gives about 12.6 km ancient + 15.1 km history (46%).
   * Rendering uses the conformal chart u = ∫dρ/f: screen = f(ρ_player)·(e^(Δu+iΔφ) − 1), exact at the player.
 * **Layout**: concentric rows of graves; row counts come from cumulative deaths, so every grave has a global id. Radial aisles split or merge wherever the ring length doubles or halves. Style, age and sex are hashed from the id. The newest row fills in real time.
-* Geometry sliders (flat core, ancient radius, metres per history year) in the UI; `npm run model-report` prints the fit and derived geometry. Older experiments are at `/v1` and `/v2`.
+* Geometry sliders in the UI (history start, flatten window, flat core, flare, metres per history year); `npm run model-report` prints the fit and derived geometry. Older experiments are at `/v1` and `/v2`.
 
 ### Initial math exploration:
   * Extracting year->graves count mapping from available sources and models
