@@ -32,14 +32,20 @@ And if your view port is very small in comparison to the curvature of the space 
 
 ## Project status
 ### Walkable prototype (`/`, code in `frontend/src/graveyard/`)
-A 2D walkable graveyard with geometry fixed by the historical data:
-* **Death model** (`deathModel.ts`): PRB benchmark periods + OWID yearly deaths (5-year bins). Each period gets a fixed shape, the curve is Gaussian-smoothed (200 yr wide in the neolithic → 2.5 yr after 1950), and period weights are solved as a *linear* system, so every period total matches exactly. No nonlinear fitting.
-* **Surface** (`surface.ts`): metric ds² = dρ² + f(ρ)²dφ², uniform grave density σ (one plot = 2.6 m × 1.3 m).
-  * Ancient circle: flat disc, f = ρ, holds the ~9 B pre-8000 BCE graves → radius ρ₀ ≈ 98 km.
-  * Outside it time is linear and uniform density forces f = D(t)/(2πσv). Circumference continuity at the rim fixes v = D(−8000)/(2πσρ₀) ≈ 2.37 m/year, so the outer region is ~24 km wide. Curvature K = −D″/(D·v²).
-  * Rendering uses the conformal chart u = ∫dρ/f: screen = f(ρ_player)·(e^(Δu+iΔφ) − 1). It is exact at the player, rings stay circles and radial paths stay straight lines.
-* **Layout**: concentric rows of graves, split by radial aisles that branch (double) whenever the ring gets twice as long, so you can see the hyperbolic growth. Each grave has a global id (graves before it), used to generate style/age/sex deterministically. The newest row fills in real time.
-* `npm run model-report` prints the fit and the derived geometry. The older experiments are still available at `/v1` and `/v2`.
+A 2D walkable graveyard with geometry fixed by the historical data. Everything is smooth by construction: no creases, no curvature jumps.
+* **Death model** (`deathModel.ts`), 50 000 BCE → 2030, D = P·m with both factors quintic B-splines (so D is C⁴):
+  * P: smooth log-space fit of PRB's own exponential-per-period estimates and OWID decade means (positive by construction);
+  * m ≈ 1: smoothest multiplier (min ∫m′² + α·m‴²) that makes every period total exact: all PRB periods including the single pre-8000 BCE total, and each OWID decade.
+  * Both steps are single linear (KKT) solves: no iterative fitting, nothing to converge.
+* **Surface** (`surface.ts`): metric ds² = dρ² + f(ρ)²dφ², uniform grave density σ (one plot = 2.6 m × 1.3 m). **Time is the master coordinate**: pick a smooth speed of time v(t) (m/yr), then ρ = ∫v dt and f = D/(2πσv), so every ring holds exactly its years' graves.
+  * flat core: v follows the flat-disc law, f = ρ exactly;
+  * ancient zone: ln f blends (C∞ step) from the disc to f₀·(D/D₀)^β, with β → 1 at 8000 BCE; β is bisected to hit the chosen ancient radius. For 0 ≤ β ≤ 1 rings never shrink;
+  * history: v constant (time linear in distance), K = −D″/(D·v²).
+  * f is C⁴, so the curvature is C² everywhere.
+  * **Hard limit**: without a neck (rings shrinking outward) the ancient zone needs ≳ N_ancient / D(8000 BCE) ≈ 18 500 "history years" of radius, i.e. ≳ 1.8× the whole history zone, whatever v is. The blends used here reach ~32k years (95 km at 3 m/yr, the default). Smaller values are allowed and show the neck.
+  * Rendering uses the conformal chart u = ∫dρ/f: screen = f(ρ_player)·(e^(Δu+iΔφ) − 1), exact at the player.
+* **Layout**: concentric rows of graves; row counts come from cumulative deaths, so every grave has a global id. Radial aisles split or merge wherever the ring length doubles or halves. Style, age and sex are hashed from the id. The newest row fills in real time.
+* Geometry sliders (flat core, ancient radius, metres per history year) in the UI; `npm run model-report` prints the fit and derived geometry. Older experiments are at `/v1` and `/v2`.
 
 ### Initial math exploration:
   * Extracting year->graves count mapping from available sources and models

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { surface as S, T0, T_END } from './surface';
+import { DEFAULT_SHAPE, Surface, T0, T_END, type Shape } from './surface';
 import { buildMarker, buildSprites, SPRITE_H, SPRITE_W, STYLES_BY_ERA, type Style } from './sprites';
 import { formatYear, graveInfo, hash01, LANDMARKS, styleFor, type GraveInfo } from './lore';
 import './walker.css';
@@ -49,11 +49,14 @@ const fmtLen = (m: number) =>
 const fmtDur = (s: number) =>
   !isFinite(s) ? '—' : s < 90 ? `${s.toFixed(0)} s` : s < 5400 ? `${(s / 60).toFixed(0)} min` : s < 172800 ? `${(s / 3600).toFixed(1)} h` : `${(s / 86400).toFixed(1)} days`;
 
-const WELCOME = {
+// the surface is rebuilt when the geometry sliders change; the render loop reads S every frame
+let S = new Surface(DEFAULT_SHAPE);
+
+const welcome = () => ({
   year: -50000, title: 'The dawn of humanity',
   text: `Every person who ever died has a grave here, about ${Math.round(S.rowStart[S.nRows] / 1e9)} billion of them. `
     + `Walk outward and time moves forward: the oldest graves are here at the centre, the newest at the edge, ${Math.round(S.rhoEndTable / 1000)} km away.`,
-};
+});
 
 type Hit = { info: GraveInfo; row: number; rho: number; phi: number };
 
@@ -72,6 +75,8 @@ export default function Walker() {
   const [mapMode, setMapMode] = useState<'distance' | 'graves'>('graves');
   const [bigMap, setBigMap] = useState(false);
   const [walkMode, setWalkMode] = useState(false);
+  const [shape, setShape] = useState<Shape>(DEFAULT_SHAPE);
+  const [surface, setSurface] = useState(S);
 
   const state = useRef({
     rho: 6,
@@ -86,6 +91,21 @@ export default function Walker() {
   opts.current = { mapMode, walkMode, bigMap };
   const setSelectedRef = useRef(setSelected);
   setSelectedRef.current = setSelected;
+
+  // rebuild the surface (debounced) when the geometry sliders move; keep the
+  // player at the same moment in time
+  useEffect(() => {
+    if (shape === S.shape) return;
+    const id = setTimeout(() => {
+      const t = S.time(state.current.rho);
+      const next = new Surface(shape);
+      if (!next.report.ok) { setSurface(next); return; }
+      S = next;
+      state.current.rho = Math.max(0.5, S.rhoAtTime(t));
+      setSurface(next);
+    }, 150);
+    return () => clearTimeout(id);
+  }, [shape]);
 
   const jump = (t: number) => {
     const st = state.current;
@@ -180,7 +200,7 @@ export default function Walker() {
       const dx = ix / n * speed * dt, dy = iy / n * speed * dt;
       st.patternOffset[0] -= dx * st.zoom;
       st.patternOffset[1] += dy * st.zoom;
-      if (st.rho + dy <= S.rho0) {
+      if (st.rho + dy <= S.coreR) {
         // exact Euclidean step in the flat circle (lets you walk through the centre)
         const x = st.rho * Math.cos(st.phi) - dx * Math.sin(st.phi) + dy * Math.cos(st.phi);
         const y = st.rho * Math.sin(st.phi) + dx * Math.cos(st.phi) + dy * Math.sin(st.phi);
@@ -297,17 +317,23 @@ export default function Walker() {
           const km = ((k % M) + M) % M;
           let level = M, kk = km;
           while (level > 4 && kk % 2 === 0) { kk /= 2; level /= 2; }
-          const startRho = Math.max(S.rowInner(S.firstRowWithAisles(level)), S.layout.plazaR, rhoMin);
-          if (startRho >= rhoTop) continue;
           const dphi = wrapPi(km * alpha - pp);
-          const a = ringOf(startRho), b = ringOf(rhoTop);
-          const [x1, y1] = projRing(a.em1, dphi), [x2, y2] = projRing(b.em1, dphi);
-          const w1 = S.layout.aisleW * a.scale / 2, w2 = S.layout.aisleW * b.scale / 2;
           const nx = Math.cos(dphi), ny = Math.sin(dphi);
-          ctx.beginPath();
-          ctx.moveTo(x1 - nx * w1, y1 - ny * w1); ctx.lineTo(x2 - nx * w2, y2 - ny * w2);
-          ctx.lineTo(x2 + nx * w2, y2 + ny * w2); ctx.lineTo(x1 + nx * w1, y1 + ny * w1);
-          ctx.fill();
+          let any = false;
+          for (const [ra, rb] of S.aisleRowRuns(level)) {
+            const r0 = Math.max(S.rowInner(ra), S.layout.plazaR, rhoMin);
+            const r1 = Math.min(rb >= S.nRows ? Infinity : S.rowInner(rb), rhoTop);
+            if (r0 >= r1) continue;
+            any = true;
+            const a = ringOf(r0), b = ringOf(r1);
+            const [x1, y1] = projRing(a.em1, dphi), [x2, y2] = projRing(b.em1, dphi);
+            const w1 = S.layout.aisleW * a.scale / 2, w2 = S.layout.aisleW * b.scale / 2;
+            ctx.beginPath();
+            ctx.moveTo(x1 - nx * w1, y1 - ny * w1); ctx.lineTo(x2 - nx * w2, y2 - ny * w2);
+            ctx.lineTo(x2 + nx * w2, y2 + ny * w2); ctx.lineTo(x1 + nx * w1, y1 + ny * w1);
+            ctx.fill();
+          }
+          if (!any) continue;
           aislesDrawn.push(km * alpha);
         }
       }
@@ -316,7 +342,8 @@ export default function Walker() {
         aislesDrawn = near.slice(0, 60).map(p => p[1]);
       }
 
-      // rim of the ancient circle and the frontier line
+      // edge of the flat core and rim of the ancient zone (8000 BCE)
+      ring(S.coreR, 'rgba(214,180,100,0.3)', 0.4);
       ring(S.rho0, 'rgba(214,180,100,0.55)', 0.5);
 
       // ── graves ─────────────────────────────────────────────────────────────
@@ -456,7 +483,7 @@ export default function Walker() {
           const lvl = Math.round(a / (TAU / aisleLevel));
           let level = aisleLevel, kk = lvl % aisleLevel;
           while (level > 4 && kk % 2 === 0) { kk /= 2; level /= 2; }
-          if (row < S.firstRowWithAisles(level)) continue;
+          if (!S.aisleRowRuns(level).some(([ra, rb]) => row >= ra && row < rb)) continue;
           const dphi = wrapPi(a - pp);
           const [x, y] = projRing(rg.em1, dphi);
           if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
@@ -583,26 +610,24 @@ export default function Walker() {
       const t = S.time(rho);
       const inAncient = rho < S.rho0;
       const K = S.gaussK(rho);
-      const kText = inAncient ? 'flat (K = 0)' :
+      const kText = rho <= S.coreR ? 'flat core (K = 0)' :
         Math.abs(K) < 1e-12 ? '≈ flat' : `K = ${K < 0 ? '−' : '+'}1/(${fmtLen(1 / Math.sqrt(Math.abs(K)))})²`;
-      const D = S.model.D;
-      const deaths = inAncient ? S.model.ancient.D0 * Math.exp(S.model.ancient.r * (t - T0))
-        : D[Math.max(0, Math.min(D.length - 1, Math.round(t - T0)))];
+      const deaths = S.model.D(t);
       const toEdge = Math.max(0, rhoEdge - rho);
       const speed = st.speed || (opts.current.walkMode ? WALK_SPEED : (W / st.zoom) * SCREENS_PER_SECOND);
       const lines = [
-        `<b>${rho < S.layout.plazaR ? 'Central plaza' : formatYear(t, inAncient)}</b>${inAncient ? ' <span class="dim">· ancient circle</span>' : ''}`,
+        `<b>${rho < S.layout.plazaR ? 'Central plaza' : formatYear(t, inAncient)}</b>${inAncient ? ` <span class="dim">· ${rho <= S.coreR ? 'flat core' : 'ancient zone'}</span>` : ''}`,
         `graves nearer the centre <b>${fmtBig(S.cum(rho))}</b> <span class="dim">of ${fmtBig(cumNow)}</span>`,
         `deaths that year <b>${fmtBig(deaths)}</b>`,
         `from centre <b>${fmtLen(rho)}</b> · to the edge <b>${fmtLen(toEdge)}</b>`,
         `ring around here <b>${fmtLen(TAU * fp)}</b> <span class="dim">(flat plane: ${fmtLen(TAU * rho)})</span>`,
         `curvature <b>${kText}</b>`,
-        inAncient ? `time here is not linear` : `1 year = <b>${S.v.toFixed(2)} m</b> outward`,
+        `1 year = <b>${fmtLen(S.vAt(t))}</b> outward${inAncient ? ' <span class="dim">(varies in the ancient zone)</span>' : ''}`,
         `speed ${fmtLen(speed)}/s · edge in ${fmtDur(toEdge / speed)} · view ${fmtLen(W / st.zoom)} · ${drawn} graves drawn`,
       ];
       hudRef.current!.innerHTML = lines.join('<br>');
-      const near = rho < S.layout.plazaR + 40 ? WELCOME : LANDMARKS.find(l => Math.abs(S.rhoAtTime(l.year) - rho) < 40);
-      signRef.current!.innerHTML = near ? `<b>${near.title}</b>${near === WELCOME ? '' : ` · ${formatYear(near.year)}`}<br>${near.text}` : '';
+      const near = rho < S.layout.plazaR + 40 ? welcome() : LANDMARKS.find(l => Math.abs(S.rhoAtTime(l.year) - rho) < 40);
+      signRef.current!.innerHTML = near ? `<b>${near.title}</b>${near.year === -50000 ? '' : ` · ${formatYear(near.year)}`}<br>${near.text}` : '';
       signRef.current!.style.display = near ? 'block' : 'none';
     }
 
@@ -657,6 +682,7 @@ export default function Walker() {
           <input type="checkbox" checked={walkMode} onChange={e => setWalkMode(e.target.checked)} /> real walking speed (1.4 m/s)
         </label>
         <div className="dim">WASD / arrows move · Shift ×5 · wheel or +/− zoom · click a grave · click the map to travel</div>
+        <Geometry shape={shape} setShape={setShape} surface={surface} />
         <button className="gy-about-btn" onClick={() => setShowAbout(true)}>how is this built?</button>
       </div>
       {selected && (
@@ -674,6 +700,44 @@ export default function Walker() {
   );
 }
 
+function Slider({ label, value, min, max, step, onChange, fmt }: {
+  label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void; fmt: (v: number) => string;
+}) {
+  return (
+    <label className="gy-slider">
+      <span>{label}</span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} />
+      <b>{fmt(value)}</b>
+    </label>
+  );
+}
+
+function Geometry({ shape, setShape, surface }: { shape: Shape; setShape: (s: Shape) => void; surface: Surface }) {
+  const r = surface.report;
+  const hist = surface.rhoAtTime(T_END) - surface.rho0;
+  const minNoNeck = surface.model.ancientDeaths / surface.model.D(T0) * shape.v;
+  return (
+    <details className="gy-geometry">
+      <summary>geometry</summary>
+      <Slider label="flat core" value={shape.coreR / 1000} min={1} max={40} step={0.5}
+        onChange={v => setShape({ ...shape, coreR: v * 1000 })} fmt={v => `${v} km`} />
+      <Slider label="ancient zone" value={shape.ancientR / 1000} min={20} max={250} step={1}
+        onChange={v => setShape({ ...shape, ancientR: v * 1000 })} fmt={v => `${v} km`} />
+      <Slider label="1 history year" value={shape.v} min={0.5} max={10} step={0.1}
+        onChange={v => setShape({ ...shape, v })} fmt={v => `${v.toFixed(1)} m`} />
+      {r.ok ? (
+        <div className="dim">
+          ancient {fmtLen(surface.rho0)} + history {fmtLen(hist)} · ring at 8000 BCE {fmtLen(r.rimRing)} · β = {r.beta.toFixed(2)}<br />
+          tightest ancient curvature radius {fmtLen(r.minKRadius)} ·{' '}
+          {r.shrinks && r.neckRatio < 0.99
+            ? <span className="gy-warn">rings narrow to {(r.neckRatio * 100).toFixed(0)}% outward (a neck). Theoretical floor without one: {fmtLen(minNoNeck)} (a flat cylinder)</span>
+            : <span>rings never shrink</span>}
+        </div>
+      ) : <div className="gy-warn">{r.problem}</div>}
+    </details>
+  );
+}
+
 function About({ onClose }: { onClose: () => void }) {
   const m = S.model;
   return (
@@ -686,21 +750,24 @@ function About({ onClose }: { onClose: () => void }) {
           The surface is rotationally symmetric, ds² = dρ² + f(ρ)² dφ², so a ring at distance ρ is 2π·f(ρ) long.
         </p>
         <ul>
-          <li><b>Ancient circle</b> (before 8000 BCE, {fmtBig(m.ancient.N)} graves): flat disc, f = ρ, radius ρ₀ = <b>{fmtLen(S.rho0)}</b>.</li>
-          <li><b>Outer region</b>: time is linear, ρ = ρ₀ + v·(t + 8000). Uniform density forces f = D(t) / (2πσv), where D is deaths per year.</li>
-          <li>f(ρ₀) = ρ₀ (no tear at the rim) fixes v = D(−8000) / (2πσρ₀) = <b>{S.v.toFixed(3)} m / year</b>. Nothing else is tunable; σ only scales everything.</li>
-          <li>Gaussian curvature K = −f″/f = −D″ / (D v²). Where deaths grow faster than exponentially the ground is saddle-shaped.</li>
+          <li><b>Time is the master coordinate.</b> Choose a speed of time v(t) (metres per year); then ρ = ∫v dt and <b>f = D(t) / (2πσ v)</b>, so each ring holds exactly the graves of its years: uniform density by construction.</li>
+          <li><b>Flat core</b> (radius {fmtLen(S.coreR)}): v follows the flat-disc law, f = ρ exactly.</li>
+          <li><b>Ancient zone</b> (to {fmtLen(S.rho0)}, {fmtBig(m.ancientDeaths)} graves before 8000 BCE): ln f blends (C∞) from the disc to f₀·(D/D₀)^β with β → 1 at 8000 BCE; β = {S.report.beta.toFixed(2)} is solved so the zone has the radius you set. For 0 ≤ β ≤ 1 rings never shrink.</li>
+          <li><b>History</b>: v = {S.v} m/year constant, time linear in distance, K = −D″/(D v²).</li>
+          <li>D is C⁴ and every blend is C∞, so f is C⁴ and the curvature is C²: no creases or jumps anywhere.</li>
+          <li>Hard limit: without a neck the ancient zone needs ≳ N_ancient / D(8000 BCE) ≈ {Math.round(m.ancientDeaths / m.D(T0) / 1000)}k years × v of radius, i.e. ≈ {(m.ancientDeaths / m.D(T0) / (T_END - T0)).toFixed(1)}× the history zone, whatever v is.</li>
           <li>The view is a conformal map: isothermal coordinate u = ∫dρ/f, screen = f(ρ_you)·(e^(Δu + iΔφ) − 1). It is exact at your feet; zoom out to see the rest of the world shrink or grow.</li>
         </ul>
         <h2>The death model</h2>
         <p>
-          PRB benchmark periods plus OWID yearly deaths (5-year bins). Each period gets a fixed shape, the whole curve is smoothed
-          (Gaussian, 200 yr → 2.5 yr wide), and the period weights are solved as a linear system so every total matches exactly.
+          D(t) = P(t)·m(t), both quintic B-splines. P: smooth log-space fit of PRB's own exponential-per-period estimates and OWID
+          decade means. m ≈ 1: smoothest multiplier (min ∫m′² + α m‴²) making every period total exact. Both are single linear
+          solves: no iterative fitting.
         </p>
         <table>
           <thead><tr><th>period</th><th>deaths (data)</th><th>model</th></tr></thead>
           <tbody>
-            {m.periods.filter(p => p.b - p.a > 5 || p.a % 25 === 0).map(p => (
+            {m.periods.map(p => (
               <tr key={p.source}><td>{p.source}</td><td>{fmtBig(p.target)}</td><td>{((p.fitted / p.target - 1) * 100).toExponential(1)} %</td></tr>
             ))}
           </tbody>

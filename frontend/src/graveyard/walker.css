@@ -32,3 +32,8 @@
 .gy-about ul { padding-left: 18px; }
 .gy-about table { border-collapse: collapse; margin-bottom: 8px; }
 .gy-about td, .gy-about th { padding: 1px 10px 1px 0; text-align: left; }
+.gy-geometry summary { cursor: pointer; color: #f4e3b5; }
+.gy-geometry[open] { padding-top: 2px; }
+.gy-slider { display: grid !important; grid-template-columns: 120px 180px 70px; align-items: center; gap: 8px; }
+.gy-slider input { accent-color: #c8a860; }
+.gy-warn { color: #ffb070; }
