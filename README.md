@@ -31,6 +31,16 @@ But they can be simulated and explored.
 And if your view port is very small in comparison to the curvature of the space it will look very normal on your screen - things will only get "weird" once you measure distances over long paths.
 
 ## Project status
+### Walkable prototype (`/`, code in `frontend/src/graveyard/`)
+A 2D walkable graveyard with geometry fixed by the historical data:
+* **Death model** (`deathModel.ts`): PRB benchmark periods + OWID yearly deaths (5-year bins). Each period gets a fixed shape, the curve is Gaussian-smoothed (200 yr wide in the neolithic → 2.5 yr after 1950), and period weights are solved as a *linear* system, so every period total matches exactly. No nonlinear fitting.
+* **Surface** (`surface.ts`): metric ds² = dρ² + f(ρ)²dφ², uniform grave density σ (one plot = 2.6 m × 1.3 m).
+  * Ancient circle: flat disc, f = ρ, holds the ~9 B pre-8000 BCE graves → radius ρ₀ ≈ 98 km.
+  * Outside it time is linear and uniform density forces f = D(t)/(2πσv). Circumference continuity at the rim fixes v = D(−8000)/(2πσρ₀) ≈ 2.37 m/year, so the outer region is ~24 km wide. Curvature K = −D″/(D·v²).
+  * Rendering uses the conformal chart u = ∫dρ/f: screen = f(ρ_player)·(e^(Δu+iΔφ) − 1). It is exact at the player, rings stay circles and radial paths stay straight lines.
+* **Layout**: concentric rows of graves, split by radial aisles that branch (double) whenever the ring gets twice as long, so you can see the hyperbolic growth. Each grave has a global id (graves before it), used to generate style/age/sex deterministically. The newest row fills in real time.
+* `npm run model-report` prints the fit and the derived geometry. The older experiments are still available at `/v1` and `/v2`.
+
 ### Initial math exploration:
   * Extracting year->graves count mapping from available sources and models
   * Tuning the size of the Ancient Circle (all ~8 Billion graves before 8 000 B.C.E) that will be a central space, will have no hyperbolic geometry, flat space, but also will not have "time linear with distance from center" requirement as the outer part for the graveyard.

@@ -1,0 +1,34 @@
+.gy-root { position: fixed; inset: 0; overflow: hidden; background: #0c100b; color: #e6dcc3;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: none; }
+.gy-canvas { display: block; cursor: crosshair; }
+.gy-panel { position: absolute; background: rgba(12, 14, 10, 0.78); border: 1px solid rgba(214, 180, 100, 0.25);
+  border-radius: 6px; padding: 10px 12px; backdrop-filter: blur(3px); }
+.gy-panel b { color: #f4e3b5; font-weight: 600; }
+.gy-root .dim { color: #9d957f; }
+.gy-root .small { font-size: 11px; margin-top: 4px; }
+.gy-hud { top: 12px; left: 12px; max-width: min(560px, calc(100vw - 260px)); }
+.gy-sign { top: 12px; left: 50%; transform: translateX(-50%); max-width: 420px; display: none;
+  font-family: Georgia, serif; font-size: 14px; background: rgba(40, 32, 18, 0.85); }
+.gy-hud + .gy-sign { top: 190px; left: 12px; transform: none; }
+.gy-map { position: absolute; right: 12px; top: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.gy-map canvas { cursor: pointer; border-radius: 50%; }
+.gy-map.big { right: 50%; top: 50%; transform: translate(50%, -50%); align-items: center; z-index: 5; }
+.gy-map-buttons { display: flex; gap: 4px; }
+.gy-root button { background: rgba(40, 36, 26, 0.9); color: #e6dcc3; border: 1px solid rgba(214, 180, 100, 0.35);
+  border-radius: 4px; padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.gy-root button:hover { background: rgba(80, 66, 36, 0.95); }
+.gy-controls { left: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; max-width: calc(100vw - 24px); }
+.gy-jumps { display: flex; flex-wrap: wrap; gap: 4px; }
+.gy-controls label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.gy-about-btn { align-self: flex-start; }
+.gy-card { right: 12px; bottom: 12px; min-width: 240px; font-family: Georgia, serif; font-size: 14px; }
+.gy-card-title { font-size: 16px; color: #f4e3b5; margin-bottom: 4px; }
+.gy-close { position: absolute; top: 4px; right: 4px; padding: 0 6px !important; }
+.gy-about-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex;
+  align-items: center; justify-content: center; z-index: 10; }
+.gy-about { position: relative; max-width: 720px; max-height: 86vh; overflow: auto; font-size: 13px; user-select: text; }
+.gy-about h2 { font: 600 16px Georgia, serif; color: #f4e3b5; margin: 8px 0 6px; }
+.gy-about p, .gy-about ul { margin-bottom: 8px; }
+.gy-about ul { padding-left: 18px; }
+.gy-about table { border-collapse: collapse; margin-bottom: 8px; }
+.gy-about td, .gy-about th { padding: 1px 10px 1px 0; text-align: left; }
