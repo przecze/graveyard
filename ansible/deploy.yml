@@ -7,6 +7,8 @@
 # 1. TARGET DIRECTORY: Only /srv/projects/graveyard is touched
 #    - All file operations use project_dir variable
 #    - The synchronize task has explicit dest: /srv/projects/graveyard/
+#    - It deletes files there that no longer exist in the repo (rsync --delete,
+#      never outside project_dir, never the excluded paths)
 #
 # 2. NGINX-PROXY INTEGRATION:
 #    - Connects to existing nginx-proxy network (external: true)
@@ -50,7 +52,9 @@
       ansible.posix.synchronize:
         src: "{{ playbook_dir }}/../"
         dest: "{{ project_dir }}/"
-        delete: no
+        # remove files deleted from the repo (e.g. old sources the build would still
+        # typecheck); only inside project_dir, and excluded paths are never deleted
+        delete: yes
         rsync_opts:
           - "--exclude=.git"
           - "--exclude=.venv"

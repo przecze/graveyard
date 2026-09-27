@@ -21,13 +21,8 @@ http {
     ''      close;
   }
 
-  # DEV_MODE controls CSP inline permissions
-  map "${DEV_MODE}" $dev_style_inline {
-    default "";
-    "true"  " 'unsafe-inline'";
-    "1"     " 'unsafe-inline'";
-  }
-
+  # DEV_MODE controls CSP inline permissions (inline styles are always allowed:
+  # the charts library injects its stylesheet at runtime; scripts stay strict)
   map "${DEV_MODE}" $dev_script_policy {
     default "";
     "true"  " 'unsafe-inline' 'unsafe-eval'";
@@ -54,7 +49,7 @@ http {
     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     add_header Cross-Origin-Resource-Policy "same-site" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'${dev_script_policy}; style-src 'self'${dev_style_inline}; font-src 'self' data:; img-src 'self' data: https:; connect-src 'self'${dev_connect_policy}; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'${dev_script_policy}; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https:; connect-src 'self'${dev_connect_policy}; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" always;
 
     # --- Block common scanner paths ---
     location ~* \.(php|asp|aspx|jsp|cgi|pl|sh|py|rb)$ { return 404; }
