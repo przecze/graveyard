@@ -21,9 +21,14 @@ export const T0 = -8000;
 export const T_END = 2030;       // data after 2023 is extrapolated
 export const ANCIENT_START = -50000;
 const OWID_BIN = 10;
-const EXTRAPOLATION_GROWTH = 0.008;
-const MULT_SMOOTHING = 20 ** 4; // α in years⁴: multiplier bends over ≳ 20 years
-const PRIOR_SMOOTHING = 1e3; // λ in years⁶: smooths slope breaks over ~3 years
+
+/** tunable fit settings */
+export type ModelParams = {
+  priorScale: number;   // years: prior slope breaks are smoothed over ~this (λ = scale⁶)
+  multScale: number;    // years: the multiplier bends over ≳ this (α = scale⁴)
+  extrapGrowth: number; // yearly growth of deaths after the last OWID year
+};
+export const DEFAULT_MODEL_PARAMS: ModelParams = { priorScale: 3.2, multScale: 20, extrapGrowth: 0.008 };
 
 export type Period = { a: number; b: number; target: number; fitted: number; source: string };
 
@@ -36,7 +41,7 @@ const KNOT_STEP: [number, number][] = [
 
 type RawPeriod = { a: number; b: number; target: number; source: string };
 
-function rawPeriods(): { periods: RawPeriod[]; ancientDeaths: number } {
+function rawPeriods(extrapGrowth = DEFAULT_MODEL_PARAMS.extrapGrowth): { periods: RawPeriod[]; ancientDeaths: number } {
   const periods: RawPeriod[] = [];
   let ancientDeaths = 0;
   for (let i = 1; i < PRB.length; i++) {
@@ -48,7 +53,7 @@ function rawPeriods(): { periods: RawPeriod[]; ancientDeaths: number } {
   const owidLast = OWID_FIRST_YEAR + OWID_DEATHS.length - 1;
   const deathsInYear = (y: number) => y <= owidLast
     ? OWID_DEATHS[y - OWID_FIRST_YEAR]
-    : OWID_DEATHS[OWID_DEATHS.length - 1] * Math.pow(1 + EXTRAPOLATION_GROWTH, y - owidLast);
+    : OWID_DEATHS[OWID_DEATHS.length - 1] * Math.pow(1 + extrapGrowth, y - owidLast);
   for (let a = OWID_FIRST_YEAR; a < T_END; a += OWID_BIN) {
     const b = Math.min(a + OWID_BIN, T_END);
     let target = 0;
@@ -59,7 +64,7 @@ function rawPeriods(): { periods: RawPeriod[]; ancientDeaths: number } {
 }
 
 /** PRB-style point estimates of deaths/yr (t, D) used only to shape the prior */
-function priorPoints(): [number, number][] {
+export function priorPoints(): [number, number][] {
   const pts: [number, number][] = [];
   const rows = PRB.filter(r => r.year >= T0);
   const rate = (i: number) => { // (birth rate − growth) of the period ending at rows[i]
@@ -128,6 +133,9 @@ export class DeathModel {
   readonly periods: Period[];
   /** deaths before T0 (8000 BCE) */
   readonly ancientDeaths: number;
+  /** [from, to] of the flattened prior window, if any */
+  readonly flattenWindow?: [number, number];
+  readonly params: ModelParams;
   // yearly tables for exact-ish integrals (cubic Hermite in between)
   private readonly cumTab: Float64Array; // ∫_{T_START}^{T_START+k} D
   private readonly Dtab: Float64Array;
@@ -138,8 +146,9 @@ export class DeathModel {
    * `target` (the old mean rate over the window) and rises more slowly for
    * `years`. Period totals stay exact (the multiplier compensates).
    */
-  constructor(flatten?: { from: number; years: number; target: number; end: number }) {
-    const { periods: raw, ancientDeaths } = rawPeriods();
+  constructor(flatten?: { from: number; years: number; target: number; end: number }, params: ModelParams = DEFAULT_MODEL_PARAMS) {
+    this.params = params;
+    const { periods: raw, ancientDeaths } = rawPeriods(params.extrapGrowth);
 
     const breaks = [ANCIENT_START];
     for (const [until, step] of KNOT_STEP) {
@@ -164,6 +173,7 @@ export class DeathModel {
       const a = flatten.from, b = flatten.from + flatten.years;
       points = [...points.filter(([t]) => t < a || t > b), [a, flatten.target], [b, flatten.end]]
         .sort((p, q) => p[0] - q[0]) as [number, number][];
+      this.flattenWindow = [a, b];
     }
     const lnL = (t: number) => { // piecewise-linear ln D through the points
       if (t <= points[0][0]) return Math.log(points[0][1]);
@@ -173,13 +183,13 @@ export class DeathModel {
       }
       return Math.log(points[points.length - 1][1]);
     };
-    const lnP = this.lnPrior = smoothProjection(sp, quad, lnL, PRIOR_SMOOTHING);
+    const lnP = this.lnPrior = smoothProjection(sp, quad, lnL, params.priorScale ** 6);
     const rows = raw.map(() => new Array(nc).fill(0));
     for (const q of quad) {
       const P = Math.exp(q.b[0].reduce((a, b, j) => a + b * lnP[q.span - DEG + j], 0));
       for (let j = 0; j <= DEG; j++) rows[q.p][q.span - DEG + j] += q.w * P * q.b[0][j] / raw[q.p].target;
     }
-    this.mult = minRoughness(sp, quad, rows, raw.map(() => 1), MULT_SMOOTHING);
+    this.mult = minRoughness(sp, quad, rows, raw.map(() => 1), params.multScale ** 4);
     for (let y = ANCIENT_START; y <= T_END; y += 0.5)
       if (!(this.D(y) > 0)) throw new Error(`death model non-positive at ${y}`);
 
@@ -225,16 +235,24 @@ export class DeathModel {
   }
 }
 
+/** PRB's benchmark after `from`: a flatten window may not cross it (it would move deaths between periods' shapes) */
+export function maxFlatten(from: number): number {
+  const next = PRB.find(r => r.year > from);
+  return next ? next.year - from : 0;
+}
+
 const cache = new Map<string, DeathModel>();
 /** base model, or one flattened for `years` after `from` (see constructor) */
-export function deathModel(flatten?: { from: number; years: number }): DeathModel {
-  const key = flatten && flatten.years > 0 ? `${flatten.from}:${flatten.years}` : '';
+export function deathModel(flatten?: { from: number; years: number }, params: ModelParams = DEFAULT_MODEL_PARAMS): DeathModel {
+  if (flatten) flatten = { from: flatten.from, years: Math.min(flatten.years, maxFlatten(flatten.from)) };
+  const pk = `${params.priorScale}:${params.multScale}:${params.extrapGrowth}`;
+  const key = flatten && flatten.years > 0 ? `${pk}|${flatten.from}:${flatten.years}` : pk;
   let m = cache.get(key);
   if (!m) {
-    if (!key) m = new DeathModel();
+    if (key === pk) m = new DeathModel(undefined, params);
     else {
-      const base = deathModel(), { from, years } = flatten!;
-      m = new DeathModel({ from, years, target: (base.cum(from + years) - base.cum(from)) / years, end: base.D(from + years) });
+      const base = deathModel(undefined, params), { from, years } = flatten!;
+      m = new DeathModel({ from, years, target: (base.cum(from + years) - base.cum(from)) / years, end: base.D(from + years) }, params);
     }
     cache.set(key, m);
   }

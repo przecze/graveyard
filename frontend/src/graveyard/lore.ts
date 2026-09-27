@@ -1,8 +1,8 @@
-// Procedural per-grave details and fixed landmarks.
-// Everything is a pure function of the global grave id, so a grave looks and
-// "is" the same on every visit without storing anything.
+// Per-grave look and helpers. The look is a pure function of the global grave
+// id (and its age), so a grave is the same on every visit without storing
+// anything. No invented facts: a grave has an id and an approximate year.
 
-import { STYLES_BY_ERA, type Style } from './sprites';
+import type { Age, Style } from './sprites';
 
 /** 32-bit hash of a (possibly > 2^32) integer id and a salt */
 export function hash32(id: number, salt = 0): number {
@@ -23,47 +23,22 @@ export function formatYear(t: number, approx = false): string {
   return approx ? `c. ${s}` : s;
 }
 
-export function styleFor(id: number, year: number): Style {
-  // blur era borders so styles blend
-  const jitter = (hash01(id, 1) - 0.5) * (year < 1700 ? 300 : 40);
-  const t = year + jitter;
-  const era = STYLES_BY_ERA.find(e => t < e.until) ?? STYLES_BY_ERA[STYLES_BY_ERA.length - 1];
-  const total = era.styles.reduce((a, [, w]) => a + w, 0);
-  let x = hash01(id, 2) * total;
-  for (const [s, w] of era.styles) { if ((x -= w) < 0) return s; }
-  return era.styles[0][0];
+const STYLE_WEIGHTS: [Style, number][] = [['rounded', 3], ['flat', 3], ['gabled', 2], ['block', 2], ['obelisk', 1], ['rough', 1]];
+
+/** a grave's memorial shape: by hash only (nothing is claimed about eras) */
+export function styleFor(id: number): Style {
+  let x = hash01(id, 2) * 12;
+  for (const [s, w] of STYLE_WEIGHTS) { if ((x -= w) < 0) return s; }
+  return 'rounded';
 }
 
-export type GraveInfo = { id: number; year: number; age: number; sex: 'female' | 'male'; ageText: string };
-
-/** rough, era-dependent age-at-death distribution (illustrative only) */
-export function graveInfo(id: number, year: number): GraveInfo {
-  const a = hash01(id, 3), b = hash01(id, 4), c = hash01(id, 5);
-  const modern = Math.min(1, Math.max(0, (year - 1880) / 120)); // 0 before 1880 → 1 by 2000
-  const pInfant = 0.26 * (1 - modern) + 0.04 * modern;
-  const pChild = 0.2 * (1 - modern) + 0.03 * modern;
-  let age: number;
-  if (a < pInfant) age = b * b; // most infant deaths in the first weeks
-  else if (a < pInfant + pChild) age = 1 + b * 14;
-  else {
-    const mode = 35 + 38 * modern, spread = 20 - 5 * modern;
-    const g = (b + c + hash01(id, 6) - 1.5) * 2; // ≈ normal
-    age = Math.min(105, Math.max(15, mode + g * spread));
-  }
-  const ageText = age < 1 ? (age < 1 / 12 ? `${Math.max(1, Math.round(age * 365))} days` : `${Math.round(age * 12)} months`)
-    : `${Math.floor(age)} years`;
-  return { id, year, age, sex: hash01(id, 7) < 0.515 ? 'male' : 'female', ageText };
+/** how weathered a grave looks: ancient era, more than ~250 years old, recent */
+export function ageOf(year: number, switchYear: number): Age {
+  return year < switchYear ? 0 : year < 1775 ? 1 : 2;
 }
+
+/** what we know about a grave: its place in the order of deaths, so a year (approximate) */
+export type GraveInfo = { id: number; year: number };
 
 export type Landmark = { year: number; title: string; text: string };
-
-export const LANDMARKS: Landmark[] = [
-  { year: -3000, title: 'Writing', text: 'Around here the first written records appear. Everyone behind you lived and died before anyone could write their name.' },
-  { year: 1, title: 'Year 1', text: 'World population ≈ 300 million. About 55 billion people have died before this ring — roughly half of everyone who ever lived.' },
-  { year: 1200, title: 'Medieval world', text: 'PRB data resolution here is centuries: the Black Death (1347–1351) is inside the smoothed 1200–1650 period, so the rings do not show its spike.' },
-  { year: 1650, title: '500 million alive', text: 'Deaths per year start rising steadily from here. Rings get longer much faster than a flat plane allows, which is what bends the ground.' },
-  { year: 1850, title: 'Industrial age', text: 'Over a billion people alive. A ring around the graveyard here is ~65,000 km long (1.6× Earth\'s equator), yet you are only 122 km from the centre. On a flat plane it would be 770 km.' },
-  { year: 1918, title: 'Pandemic & war', text: 'The 1900–1950 PRB period (2.5 billion deaths) includes the 1918 flu and both world wars; the model spreads it smoothly.' },
-  { year: 1950, title: 'Yearly data', text: 'From here the model follows Our World in Data yearly deaths (5-year bins, smoothed). Around 48 million deaths per year.' },
-  { year: 2020, title: 'COVID-19', text: '2020–2022 saw several million excess deaths per year. You are now close to the edge: the living are just ahead.' },
-];
+// landmark texts are built from the model in Walker (landmarks()), so their numbers stay true

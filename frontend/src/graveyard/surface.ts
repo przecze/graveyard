@@ -8,70 +8,69 @@
 // order of death, so "graves nearer the centre" = σ·area(ρ). Gaussian
 // curvature K = −f_ρρ / f.
 //
-//   flat core   f = ρ (the flat disc). Graves are placed by area.
-//   ancient     one undated bucket: everyone who died before the switch year.
-//               Nobody sees time here, so the zone is defined directly in ρ
-//               for compactness: ln f rises (C∞) over the flare length to a
-//               plateau P, stays there, then blends (C∞) over the rim length
-//               onto the history law g(ρ) = f0·D(t(ρ))/D0 continued inward.
-//               P = g(ρ0 − rim), so every blend only increases f: rings never
-//               shrink. The plateau length is solved from the grave count.
-//               The plateau is a cylinder, the most compact neck-free shape:
-//               ancient width ≳ N_before·v / D0.
+//   ancient     one undated bucket: everyone who died before the switch year,
+//               from the centre out to the ancient radius R (an input). One
+//               smooth curve f = ρ·e^g (ancient.ts): regular at the centre,
+//               matching the history ring and its first three derivatives at
+//               R, holding exactly the graves before the switch, and otherwise
+//               as smooth as possible. It curves however much it has to;
+//               positive curvature (a bulge) and shrinking rings (a neck) are
+//               reported. Floor: rings never shrink ⇒ R ≳ N_before·v / D0.
 //   history     time is linear, t = switch + (ρ − ρ0)/v, f = D(t)/(2πσv),
 //               K = −D''/(D v²). Year markers start here.
 //
-// D(t) is C⁴ and the blends are C∞, so f is C⁴ and K is C² everywhere.
+// D(t) is C⁴; the ancient curve is a quintic spline joined C³ to history, so K
+// is C¹ at the rim and C² everywhere else.
 // Optionally the death rate right after the switch is "flattened" (starts
 // higher, rises slower, same period totals) to enlarge f0 and shrink the
 // ancient zone further.
 //
-// Rendering uses the isothermal coordinate u = ∫ dρ/f (u = ln ρ in the flat
-// core): w = u + iφ is conformal and the view is
+// Units: the interface measures distance in history-years (1 yr = v metres).
+// Uniformly rescaling all lengths (σ → σ/λ², v → λv, every length → λ·) gives
+// the same world, so in years the shape has one density knob: graves per yr²
+// (σv²). With the plot size fixed in metres (grid.ts, σ graves/m²) that sets
+// v = √(density/σ): denser means a year is fewer metres, i.e. plots look
+// bigger at the same view width in years. Everything else is given in years.
+//
+// Rendering uses the isothermal coordinate u = ∫ dρ/f (u ≈ ln ρ at the
+// centre): w = u + iφ is conformal and the view is
 // z = f(ρp)·(e^{w − wp} − 1), an exact isometry at the player.
 
-import { ANCIENT_START, deathModel, T_END, type DeathModel } from './deathModel';
+import { ANCIENT_CELLS, fitAncient, type AncientFit } from './ancient';
+import { DEFAULT_LAYOUT, gridMetrics, Grid, type Layout } from './grid';
+import { ANCIENT_START, DEFAULT_MODEL_PARAMS, deathModel, T_END, type DeathModel, type ModelParams } from './deathModel';
 
-export type Layout = {
-  rowH: number;         // radial row pitch (m): grave + walkway
-  pitch: number;        // nominal spacing along a row (m)
-  plazaR: number;       // central plaza radius (m), no graves
-  aisleW: number;       // radial aisle width (m)
-  aisleSpacing: number; // aisles split so neighbours are aisleSpacing..2×aisleSpacing apart
+export { DEFAULT_LAYOUT, type Layout };
+
+export type Shape = ModelParams & {
+  switchYear: number;  // history (dated, time-linear) starts here
+  flatten: number;     // years after the switch over which the death rate is flattened (0 = off)
+  density: number;     // graves per yr² (σv²): the world-shape knob
+  ancientShare: number; // ancient zone's share of the whole walk, centre → edge (0..1)
 };
 
-export const DEFAULT_LAYOUT: Layout = { rowH: 2.6, pitch: 1.3, plazaR: 14, aisleW: 2.4, aisleSpacing: 36 };
-
-export type Shape = {
-  coreR: number;      // flat core radius (m)
-  flare: number;      // distance over which rings widen from the core to the plateau (m)
-  switchYear: number; // history (dated, time-linear) starts here
-  flatten: number;    // years after the switch over which the death rate is flattened (0 = off)
-  v: number;          // metres per year in the history zone
+export const DEFAULT_SHAPE: Shape = {
+  ...DEFAULT_MODEL_PARAMS, switchYear: -3000, flatten: 3000, density: 2.7, ancientShare: 0.1,
 };
-
-export const DEFAULT_SHAPE: Shape = { coreR: 1500, flare: 2500, switchYear: -3000, flatten: 1000, v: 3 };
 
 export type ShapeReport = {
   ok: boolean;
   problem?: string;
   minKRadius: number;    // tightest curvature radius in the ancient zone (m)
   rimRing: number;       // ring length at the switch (m)
-  plateauRing: number;   // ring length on the plateau (m)
   ancientShare: number;  // ancient radius / total radius
   floorShare: number;    // same for the ideal cylinder N·v/D0
+  ancientLen: number;    // centre → switch (m)
+  historyLen: number;    // switch → T_END (m)
+  floorLen: number;      // below N_before·v/D0 the ancient rings must outgrow the history ring (a bulb) (m)
+  maxRing: number;       // longest ring in the ancient zone (m)
+  rimK: number;          // curvature of history itself at the switch (1/m²): the fit must match it
+  neck?: [number, number];   // ρ range where rings shrink outward in the ancient zone (m)
+  bulge?: [number, number];  // ρ range of positive curvature in the ancient zone (m)
+  maxBulgeK: number;         // largest positive K there (1/m², 0 if none)
 };
 
-const RIM = 400;          // rim blend length (m)
 const A_CELLS = 8192;     // ancient zone table cells
-
-/** C∞ smooth step 0→1 on [0,1], all derivatives 0 at both ends */
-function smoothStep(s: number): number {
-  if (s <= 0) return 0;
-  if (s >= 1) return 1;
-  const a = Math.exp(-1 / s), b = Math.exp(-1 / (1 - s));
-  return a / (a + b);
-}
 
 function hermite(y0: number, y1: number, m0: number, m1: number, s: number): number {
   const s2 = s * s, s3 = s2 * s;
@@ -91,19 +90,14 @@ export class Surface {
   readonly coreR: number;
   readonly t0: number;         // switch year: history starts
   readonly rho0: number;       // radius at the switch
-  readonly v: number;
+  readonly v: number;            // metres per history year
   readonly report: ShapeReport;
   readonly rhoEndTable: number;
-  readonly nRows: number;
-  readonly rowStart: Float64Array;   // graves before row i
-  readonly rowAisles: Float64Array;  // radial aisles in row i (power of two)
+  readonly grid: Grid;
   readonly ancientGraves: number;    // graves before the switch
-  private readonly aisleRuns = new Map<number, [number, number][]>();
   private readonly f0: number;
   private readonly D0: number;
-  private readonly plateau: number;
-  private readonly flareEnd: number; // ρ where the plateau starts
-  private readonly rimStart: number; // ρ where the rim blend starts
+  private readonly aFit: AncientFit;  // ancient: f' = (f0/R)·p(ρ/R), f tabulated
   // ancient tables on ρ = coreR + k·aH: ∫dρ/f and ∫2πf dρ
   private readonly aH: number;
   private readonly aU: Float64Array;
@@ -112,45 +106,26 @@ export class Surface {
   private readonly uCore: number;
 
   constructor(shape: Shape = DEFAULT_SHAPE, layout: Layout = DEFAULT_LAYOUT,
-              model: DeathModel = deathModel({ from: shape.switchYear, years: shape.flatten })) {
+              model: DeathModel = deathModel({ from: shape.switchYear, years: shape.flatten }, shape)) {
     this.layout = layout;
     this.shape = shape;
     this.model = model;
-    const sigma = this.sigma = 1 / (layout.rowH * layout.pitch);
-    const v = this.v = shape.v;
+    const gm = gridMetrics(layout);
+    const sigma = this.sigma = gm.sigma;
+    const v = this.v = Math.sqrt(shape.density / sigma);
     const T = this.t0 = shape.switchYear;
-    const coreR = this.coreR = Math.max(layout.plazaR + 10, shape.coreR);
+    const coreR = this.coreR = layout.plazaR; // f ≈ ρ inside the plaza
     this.D0 = model.D(T);
     this.f0 = this.D0 / (2 * Math.PI * sigma * v);
-    this.plateau = this.f0 * model.D(T - RIM / v) / this.D0;
     this.ancientGraves = model.cum(T);
-    const needArea = this.ancientGraves / sigma - Math.PI * (coreR ** 2 - layout.plazaR ** 2);
-
-    // pieces relative to their start: flare [0, flare], rim [0, RIM]
-    const flare = Math.max(100, shape.flare);
-    const flareF = (d: number) => {
-      const S = smoothStep(d / flare);
-      return Math.exp((1 - S) * Math.log(coreR + d) + S * Math.log(this.plateau));
-    };
-    const rimF = (d: number) => { // d from rimStart; rim ends at ρ0
-      const S = smoothStep(d / RIM);
-      const g = this.f0 * model.D(T - (RIM - d) / v) / this.D0;
-      return Math.exp((1 - S) * Math.log(this.plateau) + S * Math.log(g));
-    };
-    const integrate = (fn: (d: number) => number, L: number) => {
-      let acc = 0; const n = 400;
-      for (let k = 0; k < n; k++) for (const [x, w] of GL) acc += w * 2 * Math.PI * fn(L * (k + x) / n) * L / n;
-      return acc;
-    };
-    const plateauLen = (needArea - integrate(flareF, flare) - integrate(rimF, RIM)) / (2 * Math.PI * this.plateau);
-    let problem: string | undefined;
-    if (needArea <= 0) problem = 'the flat core holds more than all ancient graves';
-    else if (this.plateau < coreR) problem = 'the flat core is wider than the ancient rings: make it smaller';
-    else if (plateauLen < 0) problem = 'the flare alone holds more than all ancient graves: shorten it';
-    this.flareEnd = coreR + flare;
-    this.rimStart = this.flareEnd + Math.max(0, plateauLen);
-    this.rho0 = this.rimStart + RIM;
-    this.fAncientParts = { flareF, rimF };
+    const share = Math.min(0.9, Math.max(0.01, shape.ancientShare));
+    const R = this.rho0 = Math.max(4 * coreR, share / (1 - share) * (T_END - T) * v);
+    // history ring at the switch: ln f and its ρ-derivatives
+    const [D, D1, D2, D3] = model.Dd(T);
+    // f ∝ D(t), dρ = v dt  ⇒  f^(k) = f0·D^(k)/(D·v^k)
+    const f0 = this.f0;
+    const fit = this.aFit = fitAncient(R, layout.plazaR, this.ancientGraves / sigma, [f0, f0 * D1 / (D * v), f0 * D2 / (D * v * v), f0 * D3 / (D * v ** 3)]);
+    const problem = fit.problem;
 
     // ancient tables
     const L = this.rho0 - coreR;
@@ -158,14 +133,20 @@ export class Surface {
     this.aU = new Float64Array(A_CELLS + 1);
     this.aArea = new Float64Array(A_CELLS + 1);
     this.uCore = Math.log(coreR);
-    let minKR = Infinity;
+    let minKR = Infinity, maxBulgeK = 0, fPrev = coreR;
+    let neck: [number, number] | undefined, bulge: [number, number] | undefined;
+    const grow = (range: [number, number] | undefined, r: number): [number, number] => (range ? [range[0], r] : [r, r]);
     for (let k = 1; k <= A_CELLS; k++) {
+      const rk = coreR + k * this.aH, fk = this.fAncient(rk);
+      if (fk < fPrev * (1 - 1e-12)) neck = grow(neck, rk);
+      fPrev = fk;
       let su = 0, sa = 0;
       for (const [x, w] of GL) { const f = this.fAncient(coreR + (k - 1 + x) * this.aH); su += w / f; sa += w * 2 * Math.PI * f; }
       this.aU[k] = this.aU[k - 1] + su * this.aH;
       this.aArea[k] = this.aArea[k - 1] + sa * this.aH;
-      const K = this.gaussK(coreR + k * this.aH);
+      const K = this.gaussK(rk);
       if (K) minKR = Math.min(minKR, 1 / Math.sqrt(Math.abs(K)));
+      if (K > 1e-12 / (v * v)) { bulge = grow(bulge, rk); maxBulgeK = Math.max(maxBulgeK, K); }
     }
     // history table: u(t) = u(ρ0) + 2πσv² ∫ dt/D
     const nh = Math.ceil(T_END - T);
@@ -181,41 +162,27 @@ export class Surface {
     const hist = (T_END - T) * v, floor = this.ancientGraves * v / this.D0;
     this.report = {
       ok: !problem, problem, minKRadius: minKR,
-      rimRing: 2 * Math.PI * this.f0, plateauRing: 2 * Math.PI * this.plateau,
+      rimRing: 2 * Math.PI * this.f0,
       ancientShare: this.rho0 / (this.rho0 + hist), floorShare: floor / (floor + hist),
+      ancientLen: this.rho0, historyLen: hist,
+      floorLen: floor, neck, bulge, maxBulgeK, rimK: -D2 / (D * v * v),
+      maxRing: 2 * Math.PI * this.f0 * fit.F.reduce((a, b) => Math.max(a, b), 0),
     };
 
     // rows
     this.rhoEndTable = this.rhoAtTime(T_END);
-    this.nRows = Math.ceil((this.rhoEndTable - layout.plazaR) / layout.rowH);
-    this.rowStart = new Float64Array(this.nRows + 1);
-    this.rowAisles = new Float64Array(this.nRows);
-    for (let i = 0; i <= this.nRows; i++) {
-      this.rowStart[i] = Math.round(this.cum(this.rowInner(i)));
-      if (i < this.nRows) {
-        const m = 2 * Math.PI * this.f(this.rowInner(i) + layout.rowH / 2) / layout.aisleSpacing;
-        this.rowAisles[i] = Math.max(4, Math.pow(2, Math.floor(Math.log2(Math.max(m, 1)))));
-      }
-    }
-    let maxL = 4;
-    for (let i = 0; i < this.nRows; i++) maxL = Math.max(maxL, this.rowAisles[i]);
-    for (let lvl = 4; lvl <= maxL; lvl *= 2) {
-      const runs: [number, number][] = [];
-      for (let i = 0; i < this.nRows; i++) {
-        if (this.rowAisles[i] < lvl) continue;
-        if (runs.length && runs[runs.length - 1][1] === i) runs[runs.length - 1][1] = i + 1;
-        else runs.push([i, i + 1]);
-      }
-      this.aisleRuns.set(lvl, runs);
-    }
+    this.grid = new Grid(layout, this, this.rhoEndTable);
   }
 
-  private readonly fAncientParts: { flareF: (d: number) => number; rimF: (d: number) => number };
+  get nRows(): number { return this.grid.nRows; }
+  get rowStart(): Float64Array { return this.grid.rowStart; }
 
   private fAncient(rho: number): number {
-    if (rho <= this.flareEnd) return this.fAncientParts.flareF(rho - this.coreR);
-    if (rho <= this.rimStart) return this.plateau;
-    return this.fAncientParts.rimF(Math.min(rho, this.rho0) - this.rimStart);
+    const R = this.rho0, x = Math.min(Math.max(rho, 0), R) / R * ANCIENT_CELLS;
+    const k = Math.min(Math.floor(x), ANCIENT_CELLS - 1), s = x - k, F = this.aFit.F, h = 1 / ANCIENT_CELLS;
+    const sp = this.aFit.sp, p = this.aFit.p;
+    const val = hermite(F[k], F[k + 1], sp.value(p, k * h) * h, sp.value(p, (k + 1) * h) * h, s);
+    return Math.max(this.f0 * val, 1e-9);
   }
 
   // ── radial functions ───────────────────────────────────────────────────────
@@ -224,21 +191,30 @@ export class Surface {
 
   /** ring radius: a ring at ρ is 2π·f(ρ) long */
   f(rho: number): number {
-    if (rho <= this.coreR) return Math.max(rho, 1e-9);
     if (rho < this.rho0) return this.fAncient(rho);
     return this.model.D(this.time(rho)) / (2 * Math.PI * this.sigma * this.v);
   }
 
+  /** radial grave rows per history year */
+  get rowsPerYear(): number { return this.v / this.grid.m.rowH; }
+
+  /** metres → history-years of distance */
+  yr(m: number): number { return m / this.v; }
+
+  /** graves per metre walked outward × v: equals D(t) in the history zone */
+  dEquiv(rho: number): number { return rho < this.grid.L.plazaR ? 0 : 2 * Math.PI * this.sigma * this.f(rho) * this.v; }
+
   /** Gaussian curvature K = −f''/f */
   gaussK(rho: number): number {
-    if (rho <= this.coreR) return 0;
     if (rho >= this.rho0) {
       const [D, , D2] = this.model.Dd(this.time(rho));
       return -D2 / (D * this.v * this.v);
     }
-    const h = 2;
-    const f0 = this.f(rho), fp = this.f(rho + h), fm = this.f(Math.max(this.coreR, rho - h));
-    return -(fp - 2 * f0 + fm) / (h * h) / f0;
+    // f'' = (f0/R²)·p_x; at the centre K = −f'''(0) = −(f0/R³)·p_xx(0)
+    const R = this.rho0, x = Math.max(rho, 0) / R;
+    const [, px, pxx] = this.aFit.sp.eval(this.aFit.p, x, 2);
+    if (x < 1e-4) return -this.f0 * pxx / R ** 3;
+    return -this.f0 * px / (R * R) / this.fAncient(rho);
   }
 
   /** graves closer to the centre than ρ */
@@ -287,7 +263,7 @@ export class Surface {
   /** metres per year: constant in history, meaningless (undated) in the ancient zone */
   vAt(t: number): number { return t >= this.t0 ? this.v : NaN; }
 
-  /** isothermal coordinate u(ρ) = ∫ dρ/f, u = ln ρ in the flat core */
+  /** isothermal coordinate u(ρ) = ∫ dρ/f, u = ln ρ inside the plaza */
   u(rho: number): number {
     if (rho <= this.coreR) return Math.log(Math.max(rho, 1e-9));
     if (rho < this.rho0) return this.uCore + this.tableAt(this.aU, rho, f => 1 / f);
@@ -307,30 +283,6 @@ export class Surface {
     let rho = (lo + hi) / 2;
     for (let i = 0; i < 2; i++) rho -= (this.u(rho) - u) * this.f(rho);
     return rho;
-  }
-
-  // ── rows, aisles, graves ─────────────────────────────────────────────────────
-
-  rowOf(rho: number): number { return Math.floor((rho - this.layout.plazaR) / this.layout.rowH); }
-  rowInner(i: number): number { return this.layout.plazaR + i * this.layout.rowH; }
-
-  /** row intervals [a, b) in which rows have at least `count` aisles */
-  aisleRowRuns(count: number): [number, number][] {
-    return this.aisleRuns.get(Math.max(4, count)) ?? [];
-  }
-
-  /**
-   * Graves of row i are split evenly among the M segments between aisles;
-   * grave j sits at angle  seg·α + γ/2 + (l + ½)·(α − γ)/n_seg,
-   * α = 2π/M, γ = aisle width / f.
-   */
-  rowGeometry(i: number) {
-    const count = this.rowStart[i + 1] - this.rowStart[i];
-    const M = this.rowAisles[i];
-    const fMid = this.f(this.rowInner(i) + this.layout.rowH / 2);
-    const alpha = 2 * Math.PI / M;
-    const gamma = Math.min(alpha * 0.5, this.layout.aisleW / fMid);
-    return { count, M, fMid, alpha, gamma };
   }
 }
 
